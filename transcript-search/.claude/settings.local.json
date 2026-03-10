@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(uvx showboat:*)",
+      "Bash(gh search:*)",
+      "mcp__codex__codex",
+      "Bash(gh issue:*)",
+      "Bash(grep:*)"
+    ]
+  }
+}
