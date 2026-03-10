@@ -26,7 +26,7 @@ _embed_model = None
 
 def _log(msg: str) -> None:
     ts = time.strftime("%H:%M:%S")
-    print(f"[transcript-search {ts}] {msg}", file=sys.stderr)
+    print(f"[alzabo {ts}] {msg}", file=sys.stderr)
 
 
 def _compact(d: dict[str, Any]) -> dict[str, Any]:

@@ -262,7 +262,7 @@ def render_conversation(
 
 def render_index_status(status: IndexStatus) -> str:
     lines = [
-        "transcript-search status",
+        "alzabo status",
         f"claude dir: {status.transcripts_dir}",
         f"codex dir: {status.codex_dir}",
         f"watch enabled: {status.watch_enabled}",

@@ -13,7 +13,7 @@ from .render import (
 )
 
 manager = TranscriptIndexManager()
-server = FastMCP("transcript-search")
+server = FastMCP("alzabo")
 
 
 @server.tool()

@@ -8,9 +8,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-import transcript_search.index as idxmod
-import transcript_search.parsers as parsers
-import transcript_search.server as srv
+import alzabo.index as idxmod
+import alzabo.parsers as parsers
+import alzabo.server as srv
 
 
 def _make_turn(
@@ -291,7 +291,7 @@ class TestManagerQueries:
 
     def test_index_status(self):
         result = srv.index_status()
-        assert "transcript-search status" in result
+        assert "alzabo status" in result
         assert "last reindex: 2026-01-01T00:00:00Z" in result
 
 
@@ -341,7 +341,6 @@ class TestReindex:
 
 class TestStartupLatency:
     def test_mcp_handshake_responds_before_indexing_completes(self, tmp_path):
-        script = Path(__file__).resolve().parent.parent / "transcript-search.py"
         claude_dir = tmp_path / "claude"
         codex_dir = tmp_path / "codex"
         claude_dir.mkdir()
@@ -362,8 +361,7 @@ class TestStartupLatency:
             [
                 "uv",
                 "run",
-                "--script",
-                str(script),
+                "alzabo",
                 "--transcripts-dir",
                 str(claude_dir),
                 "--codex-dir",
