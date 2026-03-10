@@ -1,31 +1,6 @@
-# transcript-search roadmap
+# alzabo roadmap
 
 This file is intentionally a later-phase backlog, not an implementation checklist for the current iteration.
-
-## Standalone Extraction Plan
-
-Trigger criteria:
-
-- `transcript-search/` has no imports from sibling repo directories
-- the subproject can be installed and tested from its own `pyproject.toml`
-- CI is already scoped to the subproject path
-
-What moves later:
-
-- `transcript-search/README.md`
-- `transcript-search/ROADMAP.md`
-- `transcript-search/pyproject.toml`
-- `transcript-search/transcript-search.py`
-- `transcript-search/src/transcript_search/`
-- `transcript-search/tests/`
-- `.github/workflows/transcript-search.yml`
-
-Post-move tasks:
-
-- replace in-repo path references in docs with standalone repo paths
-- decide whether to keep the wrapper script or use only the package entrypoint
-- decide whether to publish a release artifact or keep it as a local-only tool
-- move any future fixtures or sample transcripts that are specific to this tool
 
 ## Validation TODO
 
@@ -50,7 +25,7 @@ Candidate future benchmark categories:
 Future benchmark assets to prepare:
 
 - a query set with expected session and turn matches
-- a task set where the only variable is whether `transcript-search` is available
+- a task set where the only variable is whether `alzabo` is available
 - simple scoring rules for success, latency, and provenance
 
 Current status:

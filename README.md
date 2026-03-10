@@ -1,21 +1,32 @@
-# transcript-search
+# alzabo
 
-`transcript-search` stays inside this broader repository for now, but it is packaged as a self-contained subproject under `transcript-search/`.
+An MCP server that indexes Claude Code and Codex JSONL transcripts and exposes compact, plain-text tools for search and read workflows.
 
-It runs an MCP server that indexes Claude Code and Codex JSONL transcripts and exposes compact, plain-text tools for search and read workflows.
-
-## Run
-
-From `transcript-search/`:
+## Install
 
 ```bash
-uv run transcript-search.py
+uvx alzabo
 ```
 
-From the repository root:
+Or install as a tool:
 
 ```bash
-uv run --project transcript-search transcript-search
+uv tool install alzabo
+```
+
+## Claude Code MCP config
+
+Add to `~/.claude/.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "alzabo": {
+      "command": "uvx",
+      "args": ["alzabo"]
+    }
+  }
+}
 ```
 
 Optional flags:
@@ -64,36 +75,18 @@ Codex session IDs are prefixed with `codex:` to avoid collisions with Claude ses
 
 ## Development
 
-Canonical test command from the repository root:
-
 ```bash
-uv run --project transcript-search pytest
+uv run pytest
 ```
 
 Project layout:
 
-- `transcript-search.py`: compatibility wrapper so existing `uv run transcript-search.py` setups keep working
-- `src/transcript_search/cli.py`: startup, args, watcher wiring
-- `src/transcript_search/server.py`: MCP tool definitions
-- `src/transcript_search/index.py`: indexing, ranking, state management
-- `src/transcript_search/parsers.py`: transcript parsing and signal extraction
-- `src/transcript_search/render.py`: plain-text output formatting
-- `tests/`: subproject test suite
-
-## Claude Code MCP config
-
-Add to `~/.claude/.mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "transcript-search": {
-      "command": "uv",
-      "args": ["run", "--script", "/path/to/transcript-search/transcript-search.py"]
-    }
-  }
-}
-```
+- `src/alzabo/cli.py`: startup, args, watcher wiring
+- `src/alzabo/server.py`: MCP tool definitions
+- `src/alzabo/index.py`: indexing, ranking, state management
+- `src/alzabo/parsers.py`: transcript parsing and signal extraction
+- `src/alzabo/render.py`: plain-text output formatting
+- `tests/`: test suite
 
 ## Deferred Work
 
