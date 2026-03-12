@@ -241,6 +241,15 @@ class TurnSearchResult:
     score: float
     context: list[Turn] = field(default_factory=list)
 
+    def as_dict(self, include_content: bool = True) -> dict[str, Any]:
+        d: dict[str, Any] = {
+            "score": round(self.score, 4),
+            "turn": self.turn.as_dict(include_content=include_content),
+        }
+        if self.context:
+            d["context"] = [t.as_dict(include_content=False) for t in self.context]
+        return d
+
 
 @dataclass
 class SessionSearchResult:
@@ -249,6 +258,15 @@ class SessionSearchResult:
     best_turn_number: int
     best_turn_summary: str
     matching_turns: int
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "score": round(self.best_score, 4),
+            "best_turn_number": self.best_turn_number,
+            "best_turn_summary": self.best_turn_summary,
+            "matching_turns": self.matching_turns,
+            "conversation": self.conversation.as_metadata(),
+        }
 
 
 @dataclass
@@ -259,6 +277,16 @@ class ConversationPage:
     end: int
     next_offset: int | None
 
+    def as_dict(self) -> dict[str, Any]:
+        d: dict[str, Any] = {
+            "total": self.total,
+            "offset": self.offset,
+            "items": [c.as_metadata() for c in self.items],
+        }
+        if self.next_offset is not None:
+            d["next_offset"] = self.next_offset
+        return d
+
 
 @dataclass
 class SearchResultSet:
@@ -267,6 +295,17 @@ class SearchResultSet:
     effective_mode: str
     items: list[TurnSearchResult]
 
+    def as_dict(self) -> dict[str, Any]:
+        d: dict[str, Any] = {
+            "query": self.query,
+            "mode": self.mode,
+            "result_count": len(self.items),
+            "items": [i.as_dict() for i in self.items],
+        }
+        if self.effective_mode != self.mode:
+            d["effective_mode"] = self.effective_mode
+        return d
+
 
 @dataclass
 class SessionResultSet:
@@ -274,6 +313,17 @@ class SessionResultSet:
     mode: str
     effective_mode: str
     items: list[SessionSearchResult]
+
+    def as_dict(self) -> dict[str, Any]:
+        d: dict[str, Any] = {
+            "query": self.query,
+            "mode": self.mode,
+            "result_count": len(self.items),
+            "items": [i.as_dict() for i in self.items],
+        }
+        if self.effective_mode != self.mode:
+            d["effective_mode"] = self.effective_mode
+        return d
 
 
 @dataclass
@@ -287,6 +337,19 @@ class IndexStatus:
     total_turns: int
     embeddings_ready: bool
     last_reindex_at: str
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "transcripts_dir": self.transcripts_dir,
+            "codex_dir": self.codex_dir,
+            "watch_enabled": self.watch_enabled,
+            "total_sessions": self.total_sessions,
+            "claude_sessions": self.claude_sessions,
+            "codex_sessions": self.codex_sessions,
+            "total_turns": self.total_turns,
+            "embeddings_ready": self.embeddings_ready,
+            "last_reindex_at": self.last_reindex_at,
+        }
 
 
 def strip_signatures(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -686,6 +749,12 @@ class TranscriptIndexManager:
         self._transcripts_dir = transcripts_dir
         self._codex_sessions_dir = codex_dir
         self._watch_enabled = watch_enabled
+
+    def set_index(self, index: Index) -> None:
+        with self._index_lock:
+            self._index = index
+            self._last_reindex_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self._index_ready.set()
 
     def ensure_index(self) -> None:
         self._index_ready.wait()

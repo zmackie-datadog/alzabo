@@ -7,12 +7,13 @@ from pathlib import Path
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
-from .index import _log
-from .server import manager, server
+from .index import TranscriptIndexManager, _log
+from .server import create_mcp_server
 
 
 class TranscriptChangeHandler(FileSystemEventHandler):
-    def __init__(self, debounce_seconds: float) -> None:
+    def __init__(self, manager: TranscriptIndexManager, debounce_seconds: float) -> None:
+        self._manager = manager
         self._debounce_seconds = debounce_seconds
         self._debounce_lock = threading.Lock()
         self._debounce_timer: threading.Timer | None = None
@@ -30,7 +31,7 @@ class TranscriptChangeHandler(FileSystemEventHandler):
         with self._debounce_lock:
             if self._debounce_timer is not None:
                 self._debounce_timer.cancel()
-            self._debounce_timer = threading.Timer(self._debounce_seconds, manager.reindex)
+            self._debounce_timer = threading.Timer(self._debounce_seconds, self._manager.reindex)
             self._debounce_timer.daemon = True
             self._debounce_timer.start()
 
@@ -81,6 +82,8 @@ def main() -> None:
 
     transcripts_dir = Path(args.transcripts_dir).expanduser().resolve()
     codex_dir = Path(args.codex_dir).expanduser().resolve()
+
+    manager = TranscriptIndexManager()
     manager.configure(transcripts_dir=transcripts_dir, codex_dir=codex_dir, watch_enabled=args.watch)
 
     bg = threading.Thread(target=manager.reindex, daemon=True)
@@ -88,7 +91,7 @@ def main() -> None:
 
     observer: Observer | None = None
     if args.watch:
-        handler = TranscriptChangeHandler(args.debounce_seconds)
+        handler = TranscriptChangeHandler(manager, args.debounce_seconds)
         observer = Observer()
         scheduled = False
         for path in (transcripts_dir, codex_dir):
@@ -102,6 +105,7 @@ def main() -> None:
             _log("watch requested but no transcript directories exist; watcher disabled")
             observer = None
 
+    server = create_mcp_server(manager)
     try:
         server.run()
     finally:

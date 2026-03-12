@@ -10,7 +10,14 @@ import pytest
 
 import alzabo.index as idxmod
 import alzabo.parsers as parsers
-import alzabo.server as srv
+from alzabo.render import (
+    render_conversation,
+    render_index_status,
+    render_list_conversations,
+    render_search_conversations,
+    render_search_sessions,
+    render_turn,
+)
 
 
 def _make_turn(
@@ -252,47 +259,137 @@ class TestIndexBuilding:
 class TestManagerQueries:
     @pytest.fixture(autouse=True)
     def setup_manager(self, sample_index):
-        original_manager = srv.manager
-        manager = idxmod.TranscriptIndexManager()
-        manager._index = sample_index
-        manager._index_ready.set()
-        manager._last_reindex_at = "2026-01-01T00:00:00Z"
-        srv.manager = manager
-        yield manager
-        srv.manager = original_manager
+        self.manager = idxmod.TranscriptIndexManager()
+        self.manager._index = sample_index
+        self.manager._index_ready.set()
+        self.manager._last_reindex_at = "2026-01-01T00:00:00Z"
 
     def test_search_conversations_bm25(self):
-        result = srv.search_conversations(query="terraform", limit=3, mode="bm25")
-        assert "mode: bm25" in result
-        assert "#1" in result
+        result = self.manager.search_conversations(query="terraform", limit=3, mode="bm25")
+        rendered = render_search_conversations(result)
+        assert "mode: bm25" in rendered
+        assert "#1" in rendered
 
     def test_search_conversations_context_window(self):
-        result = srv.search_conversations(query="terraform", limit=3, mode="bm25", context_window=1)
-        assert "context:" in result
-        assert "turn 0" in result
+        result = self.manager.search_conversations(query="terraform", limit=3, mode="bm25", context_window=1)
+        rendered = render_search_conversations(result)
+        assert "context:" in rendered
+        assert "turn 0" in rendered
 
     def test_search_sessions(self):
-        result = srv.search_sessions(query="terraform", limit=3, mode="bm25")
-        assert "test-session" in result
-        assert "top tools:" in result
+        result = self.manager.search_sessions(query="terraform", limit=3, mode="bm25")
+        rendered = render_search_sessions(result)
+        assert "test-session" in rendered
+        assert "top tools:" in rendered
 
     def test_list_conversations(self):
-        result = srv.list_conversations()
-        assert "1 sessions" in result
-        assert "top tools:" in result
+        page = self.manager.list_conversations()
+        rendered = render_list_conversations(page)
+        assert "1 sessions" in rendered
+        assert "top tools:" in rendered
 
     def test_read_turn_renders_signals(self):
-        result = srv.read_turn(session_id="test-session", turn_number=0)
-        assert "signals:" in result
+        turn = self.manager.get_turn("test-session", 0)
+        rendered = render_turn(turn)
+        assert "signals:" in rendered
 
     def test_read_conversation_compact(self):
-        result = srv.read_conversation(session_id="test-session", compact=True)
-        assert "=== turn 0" in result
+        convo = self.manager.get_conversation("test-session")
+        rendered = render_conversation(convo, compact=True)
+        assert "=== turn 0" in rendered
 
     def test_index_status(self):
-        result = srv.index_status()
-        assert "alzabo status" in result
-        assert "last reindex: 2026-01-01T00:00:00Z" in result
+        status = self.manager.get_index_status()
+        rendered = render_index_status(status)
+        assert "alzabo status" in rendered
+        assert "last reindex: 2026-01-01T00:00:00Z" in rendered
+
+
+class TestAsDict:
+    def test_index_status_as_dict(self):
+        status = idxmod.IndexStatus(
+            transcripts_dir="/tmp/claude",
+            codex_dir="/tmp/codex",
+            watch_enabled=True,
+            total_sessions=5,
+            claude_sessions=3,
+            codex_sessions=2,
+            total_turns=20,
+            embeddings_ready=True,
+            last_reindex_at="2026-01-01T00:00:00Z",
+        )
+        d = status.as_dict()
+        assert json.loads(json.dumps(d))  # JSON-serializable
+        assert d["total_sessions"] == 5
+        assert d["watch_enabled"] is True
+
+    def test_turn_search_result_as_dict_no_context(self):
+        turn = _make_turn(search_text="hello world")
+        result = idxmod.TurnSearchResult(turn=turn, score=0.12345)
+        d = result.as_dict()
+        assert json.loads(json.dumps(d))
+        assert d["score"] == 0.1235
+        assert "context" not in d
+        assert d["turn"]["session_id"] == "test-session"
+
+    def test_turn_search_result_as_dict_with_context(self):
+        turn = _make_turn(search_text="main", turn_number=1)
+        ctx = _make_turn(search_text="context", turn_number=0)
+        result = idxmod.TurnSearchResult(turn=turn, score=0.5, context=[ctx])
+        d = result.as_dict()
+        assert "context" in d
+        assert len(d["context"]) == 1
+        # Context turns exclude content
+        assert "user_content" not in d["context"][0]
+
+    def test_session_search_result_as_dict(self):
+        convo = _make_convo(turns=[_make_turn()])
+        result = idxmod.SessionSearchResult(
+            conversation=convo,
+            best_score=0.99,
+            best_turn_number=0,
+            best_turn_summary="test summary",
+            matching_turns=3,
+        )
+        d = result.as_dict()
+        assert json.loads(json.dumps(d))
+        assert d["score"] == 0.99
+        assert d["matching_turns"] == 3
+        assert d["conversation"]["session_id"] == "test-session"
+
+    def test_search_result_set_as_dict_no_effective_mode(self):
+        result_set = idxmod.SearchResultSet(query="test", mode="bm25", effective_mode="bm25", items=[])
+        d = result_set.as_dict()
+        assert json.loads(json.dumps(d))
+        assert d["result_count"] == 0
+        assert "effective_mode" not in d
+
+    def test_search_result_set_as_dict_with_effective_mode(self):
+        result_set = idxmod.SearchResultSet(query="test", mode="hybrid", effective_mode="bm25", items=[])
+        d = result_set.as_dict()
+        assert d["effective_mode"] == "bm25"
+
+    def test_session_result_set_as_dict(self):
+        result_set = idxmod.SessionResultSet(query="q", mode="hybrid", effective_mode="hybrid", items=[])
+        d = result_set.as_dict()
+        assert json.loads(json.dumps(d))
+        assert d["query"] == "q"
+        assert "effective_mode" not in d
+
+    def test_conversation_page_as_dict_no_next(self):
+        page = idxmod.ConversationPage(items=[], total=0, offset=0, end=0, next_offset=None)
+        d = page.as_dict()
+        assert json.loads(json.dumps(d))
+        assert "next_offset" not in d
+        assert d["total"] == 0
+
+    def test_conversation_page_as_dict_with_next(self):
+        convo = _make_convo(turns=[_make_turn()])
+        page = idxmod.ConversationPage(items=[convo], total=5, offset=0, end=1, next_offset=1)
+        d = page.as_dict()
+        assert d["next_offset"] == 1
+        assert len(d["items"]) == 1
+        assert d["items"][0]["session_id"] == "test-session"
 
 
 class TestReindex:
@@ -361,7 +458,7 @@ class TestStartupLatency:
             [
                 "uv",
                 "run",
-                "alzabo",
+                "alzabo-serve",
                 "--transcripts-dir",
                 str(claude_dir),
                 "--codex-dir",

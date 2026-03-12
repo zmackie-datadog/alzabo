@@ -29,8 +29,9 @@ dependencies = [
 ]
 
 [project.scripts]
-alzabo = "alzabo.cli:main"
+alzabo = "alzabo.main_cli:main"
 alzabo-extract = "alzabo.extract_cli:main"
+alzabo-serve = "alzabo.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/DataDog/alzabo"
