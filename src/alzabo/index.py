@@ -22,11 +22,24 @@ from .parsers import (
 
 _EMBED_DIM = 512
 _embed_model = None
+_LOG_ENABLED = True
 
 
 def _log(msg: str) -> None:
+    if not _LOG_ENABLED:
+        return
     ts = time.strftime("%H:%M:%S")
     print(f"[alzabo {ts}] {msg}", file=sys.stderr)
+
+
+def set_log_enabled(enabled: bool) -> None:
+    """Enable or suppress index/logging output."""
+    global _LOG_ENABLED
+    _LOG_ENABLED = bool(enabled)
+
+
+def get_log_enabled() -> bool:
+    return _LOG_ENABLED
 
 
 def _compact(d: dict[str, Any]) -> dict[str, Any]:

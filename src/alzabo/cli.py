@@ -37,6 +37,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=2.0,
         help="Reindex debounce delay when watch mode is enabled.",
     )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Suppress non-essential progress logs.",
+    )
     return parser
 
 
@@ -46,7 +51,15 @@ def run_mcp_server(
     codex_dir: Path,
     watch: bool = True,
     debounce_seconds: float = 2.0,
+    quiet: bool = False,
 ) -> None:
+    from .cache import set_log_enabled as set_cache_log_enabled
+    from .index import set_log_enabled as set_index_log_enabled
+
+    logging_enabled = not quiet
+    set_index_log_enabled(logging_enabled)
+    set_cache_log_enabled(logging_enabled)
+
     manager = TranscriptIndexManager()
     manager.configure(transcripts_dir=transcripts_dir, codex_dir=codex_dir, watch_enabled=watch)
 
@@ -122,6 +135,9 @@ class TranscriptChangeHandler(FileSystemEventHandler):
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
+    from .index import set_log_enabled
+
+    set_log_enabled(not getattr(args, "quiet", False))
 
     transcripts_dir = Path(args.transcripts_dir).expanduser().resolve()
     codex_dir = Path(args.codex_dir).expanduser().resolve()
@@ -130,6 +146,7 @@ def main() -> None:
         codex_dir=codex_dir,
         watch=args.watch,
         debounce_seconds=args.debounce_seconds,
+        quiet=args.quiet,
     )
 
 

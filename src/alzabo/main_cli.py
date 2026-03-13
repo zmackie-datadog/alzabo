@@ -13,6 +13,7 @@ _LEGACY_SERVE_FLAGS = {
     "--transcripts-dir",
     "--codex-dir",
     "--debounce-seconds",
+    "--quiet",
 }
 
 
@@ -40,6 +41,11 @@ def _build_legacy_serve_parser() -> argparse.ArgumentParser:
         default=2.0,
         help="Reindex debounce delay when watch mode is enabled.",
     )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Suppress non-essential progress logs.",
+    )
     return parser
 
 
@@ -56,6 +62,7 @@ def _run_legacy_serve(argv: list[str]) -> None:
         codex_dir=Path(legacy_args.codex_dir).expanduser().resolve(),
         watch=legacy_args.watch,
         debounce_seconds=legacy_args.debounce_seconds,
+        quiet=legacy_args.quiet,
     )
 
 
@@ -71,8 +78,12 @@ def _is_legacy_serve_invocation(argv: list[str]) -> bool:
 
 def _get_manager(args: argparse.Namespace) -> "TranscriptIndexManager":
     """Build a TranscriptIndexManager, using disk cache when possible."""
-    from .cache import is_cache_fresh, load_cache, save_cache
-    from .index import TranscriptIndexManager, _log
+    from .cache import is_cache_fresh, load_cache, save_cache, set_log_enabled as set_cache_log_enabled
+    from .index import TranscriptIndexManager, _log, set_log_enabled as set_index_log_enabled
+
+    logging_enabled = not args.quiet
+    set_index_log_enabled(logging_enabled)
+    set_cache_log_enabled(logging_enabled)
 
     transcripts_dir = Path(args.transcripts_dir).expanduser().resolve()
     codex_dir = Path(args.codex_dir).expanduser().resolve()
@@ -199,6 +210,7 @@ def cmd_serve(args: argparse.Namespace) -> None:
         codex_dir=codex_dir,
         watch=args.watch,
         debounce_seconds=args.debounce_seconds,
+        quiet=args.quiet,
     )
 
 
@@ -237,6 +249,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     shared.add_argument("--format", choices=["text", "json", "jsonl"], default="text", help="Output format.")
     shared.add_argument("--no-cache", action="store_true", help="Skip disk cache, always reindex.")
+    shared.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Suppress non-essential progress logs.",
+    )
 
     subparsers = parser.add_subparsers(dest="command")
 

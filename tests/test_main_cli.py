@@ -74,6 +74,11 @@ class TestParser:
         args = parser.parse_args(["list", "--format", "jsonl"])
         assert args.format == "jsonl"
 
+    def test_global_quiet(self):
+        parser = build_parser()
+        args = parser.parse_args(["status", "--quiet"])
+        assert args.quiet is True
+
 
 class TestCacheBypass:
     @pytest.fixture(autouse=True)
@@ -200,6 +205,7 @@ class TestLegacyCompatibility:
             codex_dir,
             watch: bool = True,
             debounce_seconds: float = 2.0,
+            quiet: bool = False,
         ) -> None:
             calls["transcripts_dir"] = transcripts_dir
             calls["codex_dir"] = codex_dir
@@ -224,13 +230,44 @@ class TestLegacyCompatibility:
         assert calls["watch"] is True
         assert calls["debounce_seconds"] == 3.0
 
+    def test_legacy_watch_invocation_respects_quiet(self, monkeypatch, tmp_path, capsys):
+        calls: dict[str, object] = {}
+
+        def fake_run_mcp_server(
+            *,
+            transcripts_dir,
+            codex_dir,
+            watch: bool = True,
+            debounce_seconds: float = 2.0,
+            quiet: bool = False,
+        ) -> None:
+            calls["quiet"] = quiet
+
+        monkeypatch.setattr("alzabo.cli.run_mcp_server", fake_run_mcp_server)
+        monkeypatch.setattr(sys, "argv", [
+            "alzabo",
+            "--watch",
+            "--quiet",
+            "--transcripts-dir", str(tmp_path / "c"),
+            "--codex-dir", str(tmp_path / "x"),
+        ])
+
+        import alzabo.main_cli as main_cli
+
+        main_cli.main()
+
+        captured = capsys.readouterr()
+        assert "deprecated" in captured.err.lower()
+        assert calls["quiet"] is True
+
     def test_serve_subcommand_delegates_to_cli(self, monkeypatch, tmp_path):
         calls: dict[str, object] = {}
 
-        def fake_run_mcp_server(*, transcripts_dir, codex_dir, watch=True, debounce_seconds=2.0) -> None:
+        def fake_run_mcp_server(*, transcripts_dir, codex_dir, watch=True, debounce_seconds=2.0, quiet: bool = False) -> None:
             calls["transcripts_dir"] = transcripts_dir
             calls["codex_dir"] = codex_dir
             calls["watch"] = watch
+            calls["quiet"] = quiet
 
         monkeypatch.setattr("alzabo.cli.run_mcp_server", fake_run_mcp_server)
         monkeypatch.setattr(sys, "argv", [
@@ -246,6 +283,7 @@ class TestLegacyCompatibility:
         main_cli.main()
 
         assert calls["watch"] is False
+        assert calls["quiet"] is False
 
     def test_extract_subcommand_delegates_to_extract_cli(self, monkeypatch, tmp_path):
         calls: dict[str, object] = {}

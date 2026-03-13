@@ -20,9 +20,21 @@ from .index import (
 
 CACHE_VERSION = 1
 CACHE_DIR = Path.home() / ".cache" / "alzabo"
+_LOG_ENABLED = True
+
+
+def set_log_enabled(enabled: bool) -> None:
+    global _LOG_ENABLED
+    _LOG_ENABLED = bool(enabled)
+
+
+def get_log_enabled() -> bool:
+    return _LOG_ENABLED
 
 
 def _log(msg: str) -> None:
+    if not _LOG_ENABLED:
+        return
     ts = time.strftime("%H:%M:%S")
     print(f"[alzabo {ts}] {msg}", file=sys.stderr)
 

@@ -40,6 +40,7 @@ These can be placed after the subcommand:
 - `--no-cache`: skip disk cache, always reindex from source files
 - `--transcripts-dir`: Claude transcript directory (default: `~/.claude/projects`)
 - `--codex-dir`: Codex session directory (default: `~/.codex/sessions`)
+- `--quiet`: suppress progress logs for cleaner LLM/agent consumption
 
 ### Disk cache
 
@@ -60,6 +61,38 @@ Add to `~/.claude/.mcp.json`:
     }
   }
 }
+```
+
+To test the local checkout instead of a published tool, use an absolute project path:
+
+```json
+{
+  "mcpServers": {
+    "alzabo": {
+      "command": "uvx",
+      "args": ["--directory", "/absolute/path/to/alzabo", "--from", ".", "alzabo", "serve"]
+    }
+  }
+}
+```
+
+You can also bypass `uvx` if you prefer:
+
+```json
+{
+  "mcpServers": {
+    "alzabo": {
+      "command": "uv",
+      "args": ["run", "--project", "/absolute/path/to/alzabo", "alzabo", "serve"]
+    }
+  }
+}
+```
+
+After updating your MCP config, restart the MCP host and then verify:
+
+```bash
+uvx --directory /absolute/path/to/alzabo --from . alzabo --help
 ```
 
 ### MCP tools
