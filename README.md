@@ -76,7 +76,29 @@ To test the local checkout instead of a published tool, use an absolute project 
 }
 ```
 
-You can also bypass `uvx` if you prefer:
+You can also install the repo in editable mode so `which alzabo` resolves to this checkout:
+
+```bash
+cd /absolute/path/to/alzabo
+uv tool install -e .
+```
+
+Then configure MCP to run the binary directly:
+
+```json
+{
+  "mcpServers": {
+    "alzabo": {
+      "command": "alzabo",
+      "args": ["serve"]
+    }
+  }
+}
+```
+
+Either approach works for `alzabo serve`; both still expose the same MCP tools and preserve the old `alzabo-serve` compatibility entry point.
+
+You can also bypass `uvx` on each run by invoking `uv` directly:
 
 ```json
 {
