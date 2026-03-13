@@ -32,6 +32,15 @@ def get_log_enabled() -> bool:
     return _LOG_ENABLED
 
 
+def get_cache_dir() -> Path:
+    return CACHE_DIR
+
+
+def set_cache_dir(path: str | Path) -> None:
+    global CACHE_DIR
+    CACHE_DIR = Path(path).expanduser().resolve()
+
+
 def _log(msg: str) -> None:
     if not _LOG_ENABLED:
         return

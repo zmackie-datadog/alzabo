@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import json
 import sys
 
@@ -78,6 +77,33 @@ class TestParser:
         parser = build_parser()
         args = parser.parse_args(["status", "--quiet"])
         assert args.quiet is True
+
+    def test_global_cache_dir(self):
+        parser = build_parser()
+        args = parser.parse_args(["status", "--cache-dir", "/tmp/alzabo-cache-test"])
+        assert args.cache_dir == "/tmp/alzabo-cache-test"
+
+
+class TestCacheConfig:
+    def test_cache_dir_env(self, tmp_path, monkeypatch):
+        parser = build_parser()
+        transcripts = tmp_path / "claude"
+        codex = tmp_path / "codex"
+        transcripts.mkdir()
+        codex.mkdir()
+        monkeypatch.setattr(idxmod, "embed_texts", lambda texts: np.ones((len(texts), 3), dtype=np.float32))
+
+        monkeypatch.setenv("ALZABO_CACHE_DIR", str(tmp_path / "from-env"))
+        args = parser.parse_args([
+            "status",
+            "--no-cache",
+            "--transcripts-dir", str(transcripts),
+            "--codex-dir", str(codex),
+        ])
+        from alzabo.main_cli import _get_manager
+
+        _get_manager(args)
+        assert cache_mod.get_cache_dir() == (tmp_path / "from-env").resolve()
 
 
 class TestCacheBypass:

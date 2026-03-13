@@ -38,6 +38,7 @@ These can be placed after the subcommand:
 
 - `--format {text,json,jsonl}`: output format (default: `text`)
 - `--no-cache`: skip disk cache, always reindex from source files
+- `--cache-dir`: override cache directory (defaults to `~/.cache/alzabo`)
 - `--transcripts-dir`: Claude transcript directory (default: `~/.claude/projects`)
 - `--codex-dir`: Codex session directory (default: `~/.codex/sessions`)
 - `--quiet`: suppress progress logs for cleaner LLM/agent consumption
@@ -45,6 +46,18 @@ These can be placed after the subcommand:
 ### Disk cache
 
 On first run, alzabo indexes all transcripts and saves a cache to `~/.cache/alzabo/`. Subsequent runs load from cache if no source files have changed, making startup near-instant. Use `--no-cache` to force a fresh reindex.
+
+You can verify cache reuse with:
+
+```bash
+python scripts/verify_cache.py \
+  --binary alzabo \
+  --cache-dir /tmp/alzabo-cache-verify \
+  --output-dir /tmp/alzabo-cache-verify/run
+```
+
+Artifacts are written under `--output-dir` (`run1.stdout`, `run1.stderr`, `run2.stdout`, `run2.stderr`, `summary.json`).
+`summary.json` includes `cache_reused` and per-run return codes.
 
 ## MCP Server
 

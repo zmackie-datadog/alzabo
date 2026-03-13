@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -78,12 +79,24 @@ def _is_legacy_serve_invocation(argv: list[str]) -> bool:
 
 def _get_manager(args: argparse.Namespace) -> "TranscriptIndexManager":
     """Build a TranscriptIndexManager, using disk cache when possible."""
-    from .cache import is_cache_fresh, load_cache, save_cache, set_log_enabled as set_cache_log_enabled
+    from .cache import (
+        is_cache_fresh,
+        load_cache,
+        save_cache,
+        set_cache_dir,
+        set_log_enabled as set_cache_log_enabled,
+    )
     from .index import TranscriptIndexManager, _log, set_log_enabled as set_index_log_enabled
 
     logging_enabled = not args.quiet
     set_index_log_enabled(logging_enabled)
     set_cache_log_enabled(logging_enabled)
+
+    cache_dir = getattr(args, "cache_dir", "")
+    if not cache_dir:
+        cache_dir = os.environ.get("ALZABO_CACHE_DIR", "")
+    if cache_dir:
+        set_cache_dir(cache_dir)
 
     transcripts_dir = Path(args.transcripts_dir).expanduser().resolve()
     codex_dir = Path(args.codex_dir).expanduser().resolve()
@@ -249,6 +262,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     shared.add_argument("--format", choices=["text", "json", "jsonl"], default="text", help="Output format.")
     shared.add_argument("--no-cache", action="store_true", help="Skip disk cache, always reindex.")
+    shared.add_argument(
+        "--cache-dir",
+        default="",
+        help="Override cache directory (defaults to ~/.cache/alzabo).",
+    )
     shared.add_argument(
         "--quiet",
         action="store_true",
