@@ -735,15 +735,18 @@ def build_claude_index(base_dir: Path) -> tuple[Index, int]:
 
 
 class TranscriptIndexManager:
-    def __init__(self) -> None:
+    def __init__(self, index: Index | None = None) -> None:
         self._index_lock = threading.RLock()
         self._reindex_lock = threading.Lock()
         self._index_ready = threading.Event()
-        self._index = Index()
+        self._index = index or Index()
         self._transcripts_dir = Path.home() / ".claude" / "projects"
         self._codex_sessions_dir = Path.home() / ".codex" / "sessions"
         self._watch_enabled = True
         self._last_reindex_at = ""
+        if index is not None:
+            self._index_ready.set()
+            self._last_reindex_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     def configure(self, transcripts_dir: Path, codex_dir: Path, watch_enabled: bool) -> None:
         self._transcripts_dir = transcripts_dir

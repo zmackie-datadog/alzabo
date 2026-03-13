@@ -167,3 +167,10 @@ class TestSetIndex:
         status = manager.get_index_status()
         assert status.total_turns == 2
         assert status.last_reindex_at != ""
+
+    def test_init_accepts_prebuilt_index(self):
+        idx = _make_index(2)
+        manager = idxmod.TranscriptIndexManager(index=idx)
+        status = manager.get_index_status()
+        assert status.total_turns == 2
+        assert status.total_sessions == 1

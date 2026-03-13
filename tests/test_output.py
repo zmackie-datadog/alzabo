@@ -183,3 +183,8 @@ class TestFormatIndexStatus:
     def test_text_matches_render(self):
         s = self._make_status()
         assert format_index_status(s, "text") == render_index_status(s)
+
+    def test_jsonl_line_per_item(self):
+        s = self._make_status()
+        out = format_index_status(s, "jsonl")
+        assert json.loads(out) == json.loads(json.dumps(s.as_dict()))

@@ -4,8 +4,69 @@ from __future__ import annotations
 
 import argparse
 import sys
-import threading
 from pathlib import Path
+
+_COMMANDS = {"search", "list", "read", "status", "serve", "extract"}
+_LEGACY_SERVE_FLAGS = {
+    "--watch",
+    "--no-watch",
+    "--transcripts-dir",
+    "--codex-dir",
+    "--debounce-seconds",
+}
+
+
+def _build_legacy_serve_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument(
+        "--transcripts-dir",
+        default=str(Path.home() / ".claude" / "projects"),
+        help="Root directory to recursively scan for Claude .jsonl transcripts.",
+    )
+    parser.add_argument(
+        "--codex-dir",
+        default=str(Path.home() / ".codex" / "sessions"),
+        help="Root directory for Codex .jsonl sessions.",
+    )
+    parser.add_argument(
+        "--watch",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Watch transcript files and auto-reindex on changes (default: true).",
+    )
+    parser.add_argument(
+        "--debounce-seconds",
+        type=float,
+        default=2.0,
+        help="Reindex debounce delay when watch mode is enabled.",
+    )
+    return parser
+
+
+def _run_legacy_serve(argv: list[str]) -> None:
+    from .cli import run_mcp_server
+
+    legacy_args = _build_legacy_serve_parser().parse_args(argv)
+    print(
+        "warning: bare `alzabo --watch` is deprecated; use `alzabo serve`",
+        file=sys.stderr,
+    )
+    run_mcp_server(
+        transcripts_dir=Path(legacy_args.transcripts_dir).expanduser().resolve(),
+        codex_dir=Path(legacy_args.codex_dir).expanduser().resolve(),
+        watch=legacy_args.watch,
+        debounce_seconds=legacy_args.debounce_seconds,
+    )
+
+
+def _is_legacy_serve_invocation(argv: list[str]) -> bool:
+    if not argv:
+        return False
+    if argv[0] in _COMMANDS:
+        return False
+    if any(token in _COMMANDS for token in argv):
+        return False
+    return any(flag in _LEGACY_SERVE_FLAGS for flag in argv)
 
 
 def _get_manager(args: argparse.Namespace) -> "TranscriptIndexManager":
@@ -128,76 +189,35 @@ def cmd_status(args: argparse.Namespace) -> None:
 
 
 def cmd_serve(args: argparse.Namespace) -> None:
-    from watchdog.observers import Observer
-
-    from .cli import TranscriptChangeHandler
-    from .index import TranscriptIndexManager, _log
-    from .server import create_mcp_server
+    from .cli import run_mcp_server
 
     transcripts_dir = Path(args.transcripts_dir).expanduser().resolve()
     codex_dir = Path(args.codex_dir).expanduser().resolve()
 
-    manager = TranscriptIndexManager()
-    manager.configure(transcripts_dir=transcripts_dir, codex_dir=codex_dir, watch_enabled=args.watch)
-
-    bg = threading.Thread(target=manager.reindex, daemon=True)
-    bg.start()
-
-    observer: Observer | None = None
-    if args.watch:
-        handler = TranscriptChangeHandler(manager, args.debounce_seconds)
-        observer = Observer()
-        scheduled = False
-        for path in (transcripts_dir, codex_dir):
-            if path.exists() and path.is_dir():
-                observer.schedule(handler, str(path), recursive=True)
-                scheduled = True
-        if scheduled:
-            observer.daemon = True
-            observer.start()
-        else:
-            _log("watch requested but no transcript directories exist; watcher disabled")
-            observer = None
-
-    server = create_mcp_server(manager)
-    try:
-        server.run()
-    finally:
-        if observer is not None:
-            observer.stop()
-            observer.join(timeout=2)
+    run_mcp_server(
+        transcripts_dir=transcripts_dir,
+        codex_dir=codex_dir,
+        watch=args.watch,
+        debounce_seconds=args.debounce_seconds,
+    )
 
 
 def cmd_extract(args: argparse.Namespace) -> None:
-    from .extract import extract_all
-    from .extract_cli import _print_stats
-
     transcripts_dir = Path(args.transcripts_dir).expanduser().resolve()
     codex_dir = Path(args.codex_dir).expanduser().resolve()
+    from .extract_cli import run_extract
 
-    filters = {
-        "tool_filter": args.tool,
-        "category_filter": args.category,
-        "project_filter": args.project,
-        "session_filter": args.session,
-        "errors_only": args.errors_only,
-    }
-
-    if args.stats:
-        records = []
-        for rec in extract_all(transcripts_dir, codex_dir, **filters):
-            records.append(rec)
-            if args.extract_limit and len(records) >= args.extract_limit:
-                break
-        _print_stats(records)
-    else:
-        count = 0
-        for rec in extract_all(transcripts_dir, codex_dir, **filters):
-            print(rec.to_jsonl())
-            count += 1
-            if args.extract_limit and count >= args.extract_limit:
-                break
-        print(f"# {count} records", file=sys.stderr)
+    run_extract(
+        transcripts_dir=transcripts_dir,
+        codex_dir=codex_dir,
+        tool_filter=args.tool,
+        category_filter=args.category,
+        project_filter=args.project,
+        session_filter=args.session,
+        errors_only=args.errors_only,
+        stats=args.stats,
+        limit=args.extract_limit,
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -283,8 +303,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     parser = build_parser()
-    args = parser.parse_args()
+    argv = sys.argv[1:]
 
+    if _is_legacy_serve_invocation(argv):
+        _run_legacy_serve(argv)
+        return
+
+    args = parser.parse_args(argv)
     if not args.command:
         parser.print_help()
         sys.exit(1)

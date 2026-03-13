@@ -24,7 +24,7 @@ from .render import (
 
 
 def _json(obj: Any) -> str:
-    return json.dumps(obj, indent=2)
+    return json.dumps(obj, separators=(",", ":"))
 
 
 def _jsonl_items(items: list[dict[str, Any]]) -> str:
@@ -113,5 +113,5 @@ def format_turn(
 
 def format_index_status(status: IndexStatus, fmt: str) -> str:
     if fmt in ("json", "jsonl"):
-        return _json(status.as_dict())
+        return _jsonl_items([status.as_dict()]) if fmt == "jsonl" else _json(status.as_dict())
     return render_index_status(status)

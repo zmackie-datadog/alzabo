@@ -65,6 +65,25 @@ def _print_stats(records: list[ToolCallRecord]) -> None:
 
 
 def main() -> None:
+    parser = _build_parser()
+    args = parser.parse_args()
+
+    transcripts_dir = Path(args.transcripts_dir).expanduser().resolve()
+    codex_dir = Path(args.codex_dir).expanduser().resolve()
+    run_extract(
+        transcripts_dir=transcripts_dir,
+        codex_dir=codex_dir,
+        tool_filter=args.tool,
+        category_filter=args.category,
+        project_filter=args.project,
+        session_filter=args.session,
+        errors_only=args.errors_only,
+        stats=args.stats,
+        limit=args.limit,
+    )
+
+
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Extract structured tool call records from Claude Code and Codex transcripts."
     )
@@ -86,24 +105,34 @@ def main() -> None:
     parser.add_argument("--errors-only", action="store_true", help="Only show error records.")
     parser.add_argument("--stats", action="store_true", help="Print summary stats instead of JSONL.")
     parser.add_argument("--limit", type=int, default=0, help="Max records to output (0 = unlimited).")
-    args = parser.parse_args()
+    return parser
 
-    transcripts_dir = Path(args.transcripts_dir).expanduser().resolve()
-    codex_dir = Path(args.codex_dir).expanduser().resolve()
 
+def run_extract(
+    *,
+    transcripts_dir: Path,
+    codex_dir: Path,
+    tool_filter: str = "",
+    category_filter: str = "",
+    project_filter: str = "",
+    session_filter: str = "",
+    errors_only: bool = False,
+    stats: bool = False,
+    limit: int = 0,
+) -> None:
     filters = {
-        "tool_filter": args.tool,
-        "category_filter": args.category,
-        "project_filter": args.project,
-        "session_filter": args.session,
-        "errors_only": args.errors_only,
+        "tool_filter": tool_filter,
+        "category_filter": category_filter,
+        "project_filter": project_filter,
+        "session_filter": session_filter,
+        "errors_only": errors_only,
     }
 
-    if args.stats:
+    if stats:
         records: list[ToolCallRecord] = []
         for rec in extract_all(transcripts_dir, codex_dir, **filters):
             records.append(rec)
-            if args.limit and len(records) >= args.limit:
+            if limit and len(records) >= limit:
                 break
         _print_stats(records)
     else:
@@ -111,7 +140,7 @@ def main() -> None:
         for rec in extract_all(transcripts_dir, codex_dir, **filters):
             print(rec.to_jsonl())
             count += 1
-            if args.limit and count >= args.limit:
+            if limit and count >= limit:
                 break
         print(f"# {count} records", file=sys.stderr)
 

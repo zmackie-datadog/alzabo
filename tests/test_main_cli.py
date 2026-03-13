@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 
 import numpy as np
 import pytest
@@ -187,3 +188,96 @@ class TestStatusSubcommand:
         captured = capsys.readouterr()
         d = json.loads(captured.out)
         assert "total_turns" in d
+
+
+class TestLegacyCompatibility:
+    def test_watch_only_invokes_serve_with_deprecation_warning(self, monkeypatch, tmp_path, capsys):
+        calls: dict[str, object] = {}
+
+        def fake_run_mcp_server(
+            *,
+            transcripts_dir,
+            codex_dir,
+            watch: bool = True,
+            debounce_seconds: float = 2.0,
+        ) -> None:
+            calls["transcripts_dir"] = transcripts_dir
+            calls["codex_dir"] = codex_dir
+            calls["watch"] = watch
+            calls["debounce_seconds"] = debounce_seconds
+
+        monkeypatch.setattr("alzabo.cli.run_mcp_server", fake_run_mcp_server)
+        monkeypatch.setattr(sys, "argv", [
+            "alzabo",
+            "--watch",
+            "--transcripts-dir", str(tmp_path / "c"),
+            "--codex-dir", str(tmp_path / "x"),
+            "--debounce-seconds", "3",
+        ])
+
+        import alzabo.main_cli as main_cli
+
+        main_cli.main()
+
+        captured = capsys.readouterr()
+        assert "deprecated" in captured.err.lower()
+        assert calls["watch"] is True
+        assert calls["debounce_seconds"] == 3.0
+
+    def test_serve_subcommand_delegates_to_cli(self, monkeypatch, tmp_path):
+        calls: dict[str, object] = {}
+
+        def fake_run_mcp_server(*, transcripts_dir, codex_dir, watch=True, debounce_seconds=2.0) -> None:
+            calls["transcripts_dir"] = transcripts_dir
+            calls["codex_dir"] = codex_dir
+            calls["watch"] = watch
+
+        monkeypatch.setattr("alzabo.cli.run_mcp_server", fake_run_mcp_server)
+        monkeypatch.setattr(sys, "argv", [
+            "alzabo",
+            "serve",
+            "--no-watch",
+            "--transcripts-dir", str(tmp_path / "claude"),
+            "--codex-dir", str(tmp_path / "codex"),
+        ])
+
+        import alzabo.main_cli as main_cli
+
+        main_cli.main()
+
+        assert calls["watch"] is False
+
+    def test_extract_subcommand_delegates_to_extract_cli(self, monkeypatch, tmp_path):
+        calls: dict[str, object] = {}
+
+        def fake_run_extract(
+            *,
+            transcripts_dir,
+            codex_dir,
+            tool_filter: str = "",
+            category_filter: str = "",
+            project_filter: str = "",
+            session_filter: str = "",
+            errors_only: bool = False,
+            stats: bool = False,
+            limit: int = 0,
+        ) -> None:
+            calls["transcripts_dir"] = transcripts_dir
+            calls["codex_dir"] = codex_dir
+            calls["tool_filter"] = tool_filter
+            calls["stats"] = stats
+            calls["limit"] = limit
+
+        monkeypatch.setattr("alzabo.extract_cli.run_extract", fake_run_extract)
+        monkeypatch.setattr(sys, "argv", [
+            "alzabo",
+            "extract",
+            "--tool", "Bash",
+            "--extract-limit", "5",
+        ])
+        import alzabo.main_cli as main_cli
+
+        main_cli.main()
+
+        assert calls["tool_filter"] == "Bash"
+        assert calls["limit"] == 5

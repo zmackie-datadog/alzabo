@@ -11,6 +11,73 @@ from .index import TranscriptIndexManager, _log
 from .server import create_mcp_server
 
 
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Start MCP server with transcript watcher.",
+    )
+    parser.add_argument(
+        "--transcripts-dir",
+        default=str(Path.home() / ".claude" / "projects"),
+        help="Root directory to recursively scan for Claude .jsonl transcripts.",
+    )
+    parser.add_argument(
+        "--codex-dir",
+        default=str(Path.home() / ".codex" / "sessions"),
+        help="Root directory to recursively scan for Codex .jsonl sessions.",
+    )
+    parser.add_argument(
+        "--watch",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Watch transcript files and auto-reindex on changes (default: true).",
+    )
+    parser.add_argument(
+        "--debounce-seconds",
+        type=float,
+        default=2.0,
+        help="Reindex debounce delay when watch mode is enabled.",
+    )
+    return parser
+
+
+def run_mcp_server(
+    *,
+    transcripts_dir: Path,
+    codex_dir: Path,
+    watch: bool = True,
+    debounce_seconds: float = 2.0,
+) -> None:
+    manager = TranscriptIndexManager()
+    manager.configure(transcripts_dir=transcripts_dir, codex_dir=codex_dir, watch_enabled=watch)
+
+    bg = threading.Thread(target=manager.reindex, daemon=True)
+    bg.start()
+
+    observer: Observer | None = None
+    if watch:
+        handler = TranscriptChangeHandler(manager, debounce_seconds)
+        observer = Observer()
+        scheduled = False
+        for path in (transcripts_dir, codex_dir):
+            if path.exists() and path.is_dir():
+                observer.schedule(handler, str(path), recursive=True)
+                scheduled = True
+        if scheduled:
+            observer.daemon = True
+            observer.start()
+        else:
+            _log("watch requested but no transcript directories exist; watcher disabled")
+            observer = None
+
+    server = create_mcp_server(manager)
+    try:
+        server.run()
+    finally:
+        if observer is not None:
+            observer.stop()
+            observer.join(timeout=2)
+
+
 class TranscriptChangeHandler(FileSystemEventHandler):
     def __init__(self, manager: TranscriptIndexManager, debounce_seconds: float) -> None:
         self._manager = manager
@@ -53,65 +120,17 @@ class TranscriptChangeHandler(FileSystemEventHandler):
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Search Claude Code and Codex transcript JSONL files with hybrid search."
-    )
-    parser.add_argument(
-        "--transcripts-dir",
-        default=str(Path.home() / ".claude" / "projects"),
-        help="Root directory to recursively scan for Claude .jsonl transcripts.",
-    )
-    parser.add_argument(
-        "--codex-dir",
-        default=str(Path.home() / ".codex" / "sessions"),
-        help="Root directory to recursively scan for Codex .jsonl sessions.",
-    )
-    parser.add_argument(
-        "--watch",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Watch transcript files and auto-reindex on changes (default: true).",
-    )
-    parser.add_argument(
-        "--debounce-seconds",
-        type=float,
-        default=2.0,
-        help="Reindex debounce delay when watch mode is enabled.",
-    )
+    parser = build_parser()
     args = parser.parse_args()
 
     transcripts_dir = Path(args.transcripts_dir).expanduser().resolve()
     codex_dir = Path(args.codex_dir).expanduser().resolve()
-
-    manager = TranscriptIndexManager()
-    manager.configure(transcripts_dir=transcripts_dir, codex_dir=codex_dir, watch_enabled=args.watch)
-
-    bg = threading.Thread(target=manager.reindex, daemon=True)
-    bg.start()
-
-    observer: Observer | None = None
-    if args.watch:
-        handler = TranscriptChangeHandler(manager, args.debounce_seconds)
-        observer = Observer()
-        scheduled = False
-        for path in (transcripts_dir, codex_dir):
-            if path.exists() and path.is_dir():
-                observer.schedule(handler, str(path), recursive=True)
-                scheduled = True
-        if scheduled:
-            observer.daemon = True
-            observer.start()
-        else:
-            _log("watch requested but no transcript directories exist; watcher disabled")
-            observer = None
-
-    server = create_mcp_server(manager)
-    try:
-        server.run()
-    finally:
-        if observer is not None:
-            observer.stop()
-            observer.join(timeout=2)
+    run_mcp_server(
+        transcripts_dir=transcripts_dir,
+        codex_dir=codex_dir,
+        watch=args.watch,
+        debounce_seconds=args.debounce_seconds,
+    )
 
 
 if __name__ == "__main__":
