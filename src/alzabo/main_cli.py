@@ -1,4 +1,4 @@
-"""Unified CLI entry point for alzabo: search, list, read, status, serve, extract."""
+"""Unified CLI entry point for alzabo: search, list, read, status, extract."""
 
 from __future__ import annotations
 
@@ -7,96 +7,40 @@ import os
 import sys
 from pathlib import Path
 
-_COMMANDS = {"search", "list", "read", "status", "serve", "extract"}
-_LEGACY_SERVE_FLAGS = {
-    "--watch",
-    "--no-watch",
-    "--transcripts-dir",
-    "--codex-dir",
-    "--debounce-seconds",
-    "--quiet",
-}
 
-
-def _build_legacy_serve_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(add_help=False)
-    parser.add_argument(
-        "--transcripts-dir",
-        default=str(Path.home() / ".claude" / "projects"),
-        help="Root directory to recursively scan for Claude .jsonl transcripts.",
-    )
-    parser.add_argument(
-        "--codex-dir",
-        default=str(Path.home() / ".codex" / "sessions"),
-        help="Root directory for Codex .jsonl sessions.",
-    )
-    parser.add_argument(
-        "--watch",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Watch transcript files and auto-reindex on changes (default: true).",
-    )
-    parser.add_argument(
-        "--debounce-seconds",
-        type=float,
-        default=2.0,
-        help="Reindex debounce delay when watch mode is enabled.",
-    )
-    parser.add_argument(
-        "--quiet",
-        action="store_true",
-        help="Suppress non-essential progress logs.",
-    )
-    return parser
-
-
-def _run_legacy_serve(argv: list[str]) -> None:
-    from .cli import run_mcp_server
-
-    legacy_args = _build_legacy_serve_parser().parse_args(argv)
-    print(
-        "warning: bare `alzabo --watch` is deprecated; use `alzabo serve`",
-        file=sys.stderr,
-    )
-    run_mcp_server(
-        transcripts_dir=Path(legacy_args.transcripts_dir).expanduser().resolve(),
-        codex_dir=Path(legacy_args.codex_dir).expanduser().resolve(),
-        watch=legacy_args.watch,
-        debounce_seconds=legacy_args.debounce_seconds,
-        quiet=legacy_args.quiet,
-    )
-
-
-def _is_legacy_serve_invocation(argv: list[str]) -> bool:
-    if not argv:
-        return False
-    if argv[0] in _COMMANDS:
-        return False
-    if any(token in _COMMANDS for token in argv):
-        return False
-    return any(flag in _LEGACY_SERVE_FLAGS for flag in argv)
-
-
-def _get_manager(args: argparse.Namespace) -> "TranscriptIndexManager":
-    """Build a TranscriptIndexManager, using disk cache when possible."""
-    from .cache import (
-        is_cache_fresh,
-        load_cache,
-        save_cache,
-        set_cache_dir,
-        set_log_enabled as set_cache_log_enabled,
-    )
-    from .index import TranscriptIndexManager, _log, set_log_enabled as set_index_log_enabled
-
-    logging_enabled = not args.quiet
-    set_index_log_enabled(logging_enabled)
-    set_cache_log_enabled(logging_enabled)
+def _resolve_cache_dir(args: argparse.Namespace) -> Path:
+    from . import cache as cache_mod
 
     cache_dir = getattr(args, "cache_dir", "")
     if not cache_dir:
         cache_dir = os.environ.get("ALZABO_CACHE_DIR", "")
     if cache_dir:
-        set_cache_dir(cache_dir)
+        cache_mod.set_cache_dir(cache_dir)
+    return cache_mod.get_cache_dir()
+
+
+def _get_manager(args: argparse.Namespace) -> "TranscriptIndexManager":
+    """Build a TranscriptIndexManager, using disk cache when possible."""
+    from .cache import (
+        changed_source_files,
+        collect_source_files,
+        partition_changed_files_by_stability,
+        load_cache_bundle,
+        save_cache,
+        set_log_enabled as set_cache_log_enabled,
+    )
+    from .index import (
+        TranscriptIndexManager,
+        rebuild_index_incrementally,
+        _log,
+        set_log_enabled as set_index_log_enabled,
+    )
+
+    logging_enabled = not args.quiet
+    set_index_log_enabled(logging_enabled)
+    set_cache_log_enabled(logging_enabled)
+
+    _resolve_cache_dir(args)
 
     transcripts_dir = Path(args.transcripts_dir).expanduser().resolve()
     codex_dir = Path(args.codex_dir).expanduser().resolve()
@@ -106,13 +50,52 @@ def _get_manager(args: argparse.Namespace) -> "TranscriptIndexManager":
 
     no_cache = getattr(args, "no_cache", False)
 
-    if not no_cache and is_cache_fresh(transcripts_dir, codex_dir):
-        _log("loading from cache...")
-        index = load_cache()
-        if index is not None:
-            manager.set_index(index)
-            return manager
-        _log("cache load failed, falling back to reindex")
+    if not no_cache:
+        cache_bundle = load_cache_bundle()
+        if cache_bundle is not None:
+            cached_index, manifest = cache_bundle
+            cache_reindex_at = manifest.get("reindex_at", "")
+            current_files = collect_source_files(transcripts_dir, codex_dir)
+            changed_files = changed_source_files(manifest.get("source_files", {}), current_files)
+            same_directories = (
+                manifest.get("transcripts_dir") == str(transcripts_dir)
+                and manifest.get("codex_dir") == str(codex_dir)
+            )
+
+            if same_directories and not changed_files:
+                _log("loading from cache...")
+                manager.set_index(cached_index, reindex_at=cache_reindex_at)
+                return manager
+
+            if same_directories:
+                debounce_seconds = float(getattr(args, "debounce_seconds", 2.0))
+                settled_files, unstable_files = partition_changed_files_by_stability(
+                    changed_files,
+                    current_files,
+                    debounce_seconds=debounce_seconds,
+                )
+
+                if unstable_files:
+                    _log(
+                        "cache stale, deferring incremental update while "
+                        f"{len(unstable_files)} file(s) are still changing"
+                    )
+                if not settled_files:
+                    manager.set_index(cached_index, reindex_at=cache_reindex_at)
+                    return manager
+
+                _log("cache stale, attempting incremental update...")
+                incremental_index = rebuild_index_incrementally(
+                    cached_index,
+                    changed_files=settled_files,
+                    transcripts_dir=transcripts_dir,
+                    codex_dir=codex_dir,
+                )
+                if incremental_index is not None:
+                    manager.set_index(incremental_index)
+                    save_cache(incremental_index, transcripts_dir, codex_dir, reindex_at=None)
+                    _log("loaded updated cache incrementally")
+                    return manager
 
     _log("indexing transcripts...")
     manager.reindex()
@@ -212,21 +195,6 @@ def cmd_status(args: argparse.Namespace) -> None:
     print(format_index_status(status, args.format))
 
 
-def cmd_serve(args: argparse.Namespace) -> None:
-    from .cli import run_mcp_server
-
-    transcripts_dir = Path(args.transcripts_dir).expanduser().resolve()
-    codex_dir = Path(args.codex_dir).expanduser().resolve()
-
-    run_mcp_server(
-        transcripts_dir=transcripts_dir,
-        codex_dir=codex_dir,
-        watch=args.watch,
-        debounce_seconds=args.debounce_seconds,
-        quiet=args.quiet,
-    )
-
-
 def cmd_extract(args: argparse.Namespace) -> None:
     transcripts_dir = Path(args.transcripts_dir).expanduser().resolve()
     codex_dir = Path(args.codex_dir).expanduser().resolve()
@@ -272,6 +240,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Suppress non-essential progress logs.",
     )
+    shared.add_argument(
+        "--debounce-seconds",
+        type=float,
+        default=2.0,
+        help="Reindex debounce delay when checking for stale cache.",
+    )
 
     subparsers = parser.add_subparsers(dest="command")
 
@@ -313,12 +287,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_status = subparsers.add_parser("status", parents=[shared], help="Show index status.")
     p_status.set_defaults(func=cmd_status)
 
-    # --- serve ---
-    p_serve = subparsers.add_parser("serve", parents=[shared], help="Start MCP server.")
-    p_serve.add_argument("--watch", action=argparse.BooleanOptionalAction, default=True)
-    p_serve.add_argument("--debounce-seconds", type=float, default=2.0)
-    p_serve.set_defaults(func=cmd_serve)
-
     # --- extract ---
     p_extract = subparsers.add_parser("extract", parents=[shared], help="Extract structured tool call records.")
     p_extract.add_argument("--tool", default="", help="Filter by tool name substring.")
@@ -339,10 +307,6 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = build_parser()
     argv = sys.argv[1:]
-
-    if _is_legacy_serve_invocation(argv):
-        _run_legacy_serve(argv)
-        return
 
     args = parser.parse_args(argv)
     if not args.command:

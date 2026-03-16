@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "alzabo"
 version = "0.1.0"
-description = "MCP server for searching Claude Code and Codex transcripts."
+description = "CLI tool for searching Claude Code and Codex transcripts."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12"
@@ -21,17 +21,14 @@ classifiers = [
     "Topic :: Software Development :: Libraries",
 ]
 dependencies = [
-  "mcp[cli]>=1.0",
   "model2vec",
   "numpy",
   "rank-bm25",
-  "watchdog>=4.0",
 ]
 
 [project.scripts]
 alzabo = "alzabo.main_cli:main"
 alzabo-extract = "alzabo.extract_cli:main"
-alzabo-serve = "alzabo.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/DataDog/alzabo"
