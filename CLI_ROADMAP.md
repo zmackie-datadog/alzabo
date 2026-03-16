@@ -54,6 +54,15 @@ alzabo extract                                   # tool call extraction (current
 - Update README to lead with CLI usage
 - **Verify:** old MCP config still works with `alzabo serve`
 
+### Step 8: Resident daemon + IPC-backed CLI (optimize for frequently-updating session data)
+- Start a resident process from `alzabo serve` that hosts both MCP server and a local IPC bridge.
+- Route `alzabo` read/search/list/status commands to IPC first when scope/paths match:
+  - reuse warm index in-memory for fast repeated lookups
+  - avoid re-reading/rebuilding cache on every invocation
+  - fallback to local manager path when daemon is unavailable or scope diverges
+- Use per-cache scoped IPC state/socket (`cache_dir/daemon.state`) and path-safe hashed socket names for local transport.
+- **Verify:** `alzabo serve` and `alzabo search --...` within same `cache_dir` are fast and keep fresh index while transcript files are added/changed.
+
 ## Status
 - Step 1: ✅
 - Step 2: ✅
@@ -62,3 +71,4 @@ alzabo extract                                   # tool call extraction (current
 - Step 5: ✅
 - Step 6: ✅
 - Step 7: ✅
+- Step 8: ✅

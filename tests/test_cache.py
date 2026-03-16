@@ -64,6 +64,23 @@ class TestCacheRoundtrip:
             assert orig_t.user_content == load_t.user_content
             assert orig_t.signals.tools == load_t.signals.tools
 
+    def test_load_cache_bundle(self, tmp_path):
+        transcripts = tmp_path / "claude"
+        codex = tmp_path / "codex"
+        transcripts.mkdir()
+        codex.mkdir()
+
+        original = _make_index(3)
+        cache_mod.save_cache(original, transcripts, codex, reindex_at="2026-01-01T00:00:00Z")
+        bundle = cache_mod.load_cache_bundle()
+
+        assert bundle is not None
+        loaded, manifest = bundle
+        assert loaded is not None
+        assert manifest["version"] == cache_mod.CACHE_VERSION
+        assert manifest["reindex_at"] == "2026-01-01T00:00:00Z"
+        assert manifest["turn_count"] == 3
+
     def test_embeddings_shape_preserved(self, tmp_path):
         transcripts = tmp_path / "claude"
         codex = tmp_path / "codex"
@@ -77,6 +94,87 @@ class TestCacheRoundtrip:
         assert loaded is not None
         assert loaded.embeddings.shape == original.embeddings.shape
         np.testing.assert_allclose(loaded.embeddings, original.embeddings, atol=1e-6)
+
+
+class TestCacheManifest:
+    def test_changed_source_files_detects_updates(self, tmp_path):
+        transcripts = tmp_path / "claude"
+        codex = tmp_path / "codex"
+        transcripts.mkdir()
+        codex.mkdir()
+
+        file_a = transcripts / "a.jsonl"
+        file_b = transcripts / "b.jsonl"
+        file_a.write_text("alpha")
+        baseline = cache_mod.collect_source_files(transcripts, codex)
+
+        same = cache_mod.collect_source_files(transcripts, codex)
+        assert cache_mod.changed_source_files(baseline, same) == set()
+
+        # Modify a file: mtime or size changes.
+        file_a.write_text("alpha\nmore")
+        updated = cache_mod.collect_source_files(transcripts, codex)
+        assert cache_mod.changed_source_files(baseline, updated) == {str(file_a.resolve())}
+
+        # Add a file.
+        file_b.write_text("beta")
+        added = cache_mod.collect_source_files(transcripts, codex)
+        assert cache_mod.changed_source_files(updated, added) == {str(file_b.resolve())}
+
+        # Remove a file.
+        file_a.unlink()
+        removed = cache_mod.collect_source_files(transcripts, codex)
+        assert cache_mod.changed_source_files(added, removed) == {str(file_a.resolve())}
+
+    def test_partition_changed_files_by_stability(self):
+        changed_files = {
+            "/tmp/settled.jsonl",
+            "/tmp/unstable.jsonl",
+            "/tmp/missing.jsonl",
+            "/tmp/non_dict.jsonl",
+        }
+        current_files = {
+            "/tmp/settled.jsonl": {"mtime": 100.0, "size": 1},
+            "/tmp/unstable.jsonl": {"mtime": 199.0, "size": 1},
+            "/tmp/non_dict.jsonl": "legacy-signature",
+        }
+
+        settled, unstable = cache_mod.partition_changed_files_by_stability(
+            changed_files=changed_files,
+            current_files=current_files,
+            debounce_seconds=10.0,
+            now=200.0,
+        )
+        assert settled == {"/tmp/settled.jsonl", "/tmp/missing.jsonl", "/tmp/non_dict.jsonl"}
+        assert unstable == {"/tmp/unstable.jsonl"}
+
+    def test_partition_changed_files_by_stability_disabled(self):
+        changed_files = {"/tmp/fast.jsonl"}
+        current_files = {"/tmp/fast.jsonl": {"mtime": 200.0, "size": 10}}
+        settled, unstable = cache_mod.partition_changed_files_by_stability(
+            changed_files=changed_files,
+            current_files=current_files,
+            debounce_seconds=0.0,
+            now=200.5,
+        )
+        assert settled == {"/tmp/fast.jsonl"}
+        assert unstable == set()
+
+    def test_cache_manifest_includes_file_signature(self, tmp_path):
+        transcripts = tmp_path / "claude"
+        codex = tmp_path / "codex"
+        transcripts.mkdir()
+        codex.mkdir()
+
+        file_a = transcripts / "a.jsonl"
+        file_a.write_text("alpha")
+
+        idx = _make_index(1)
+        cache_mod.save_cache(idx, transcripts, codex)
+        manifest = json.loads((cache_mod.CACHE_DIR / "manifest.json").read_text())
+        _, file_meta = manifest["source_files"].popitem()
+        assert "mtime" in file_meta
+        assert "size" in file_meta
 
 
 class TestCacheStaleness:

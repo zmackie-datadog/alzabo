@@ -29,6 +29,7 @@ alzabo extract --stats                      # tool call extraction stats
 | `list` | List conversations. `--source`, `--project`, `--start-date`, `--end-date`, `--offset`, `--limit` |
 | `read SESSION_ID` | Read a conversation. `--turn N` for a single turn. `--compact`, `--include-records` |
 | `status` | Show index stats: session counts, turn count, embeddings state, last reindex time |
+| `daemon-status` | Check whether a local resident `alzabo serve` process is active for the current cache scope |
 | `serve` | Start the MCP server. `--watch`/`--no-watch`, `--debounce-seconds` |
 | `extract` | Extract structured tool call records. `--stats`, `--tool`, `--category`, `--errors-only` |
 
@@ -42,6 +43,10 @@ These can be placed after the subcommand:
 - `--transcripts-dir`: Claude transcript directory (default: `~/.claude/projects`)
 - `--codex-dir`: Codex session directory (default: `~/.codex/sessions`)
 - `--quiet`: suppress progress logs for cleaner LLM/agent consumption
+
+When `alzabo serve` is running, other `alzabo` commands can reuse that resident daemon via local IPC when run with the same `--cache-dir`/directories. In that mode, commands avoid local cold-cache rebuilding and return from the in-memory index directly.
+
+If no daemon is running, non-`daemon` subcommands will start one in the background on first use and reuse it on subsequent commands (same `--cache-dir` and transcript directories). Add `--no-daemon` to force local execution and skip auto-start.
 
 ### Disk cache
 

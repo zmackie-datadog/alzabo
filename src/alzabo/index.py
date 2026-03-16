@@ -7,7 +7,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 import numpy as np
 from rank_bm25 import BM25Okapi
@@ -146,6 +146,7 @@ class Turn:
     signals: TurnSignals
     records: list[dict[str, Any]]
     search_text: str
+    source_file: str = ""
 
     @property
     def tool_uses(self) -> list[str]:
@@ -435,7 +436,12 @@ def _conversation_in_date_range(convo: Conversation, start_date: str, end_date: 
     return True
 
 
-def _finalize_turn(convo: Conversation, current_turn: dict[str, Any], turn_number: int) -> Turn:
+def _finalize_turn(
+    convo: Conversation,
+    current_turn: dict[str, Any],
+    turn_number: int,
+    source_file: str,
+) -> Turn:
     search_parts = [part for part in current_turn["search_parts"] if part]
     text = "\n".join(search_parts).strip()
     signals = TurnSignals.from_map(current_turn["signals"])
@@ -454,213 +460,220 @@ def _finalize_turn(convo: Conversation, current_turn: dict[str, Any], turn_numbe
         signals=signals,
         records=list(current_turn.get("records", [])),
         search_text=text,
+        source_file=source_file,
     )
 
 
-def build_codex_index(sessions_dir: Path) -> tuple[Index, int]:
-    idx = Index()
-    if not sessions_dir.exists():
-        return idx, 0
+def _build_codex_index_from_file(jsonl_file: Path, *, index: Index) -> None:
+    try:
+        records: list[dict[str, Any]] = []
+        with open(jsonl_file, encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    except OSError:
+        return
 
-    for jsonl_file in sessions_dir.rglob("*.jsonl"):
-        try:
-            records: list[dict[str, Any]] = []
-            with open(jsonl_file, encoding="utf-8") as handle:
-                for line in handle:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        records.append(json.loads(line))
-                    except json.JSONDecodeError:
-                        continue
-        except OSError:
-            continue
+    if not records:
+        return
 
-        if not records:
-            continue
-
-        session_id = ""
-        cwd = ""
-        for record in records:
-            if record.get("type") == "session_meta":
-                payload = record.get("payload", {})
-                session_id = str(payload.get("id", ""))
-                cwd = str(payload.get("cwd", ""))
-                break
-
-        if not session_id:
-            session_id = jsonl_file.stem
-
-        convo = Conversation(
-            session_id=f"codex:{session_id}",
-            project=normalize_project(Path(cwd).name) if cwd else jsonl_file.stem,
-            branch="",
-            slug="",
-            source="codex",
-        )
-        current_turn: dict[str, Any] | None = None
-
-        for record in records:
-            rtype = str(record.get("type", ""))
+    session_id = ""
+    cwd = ""
+    for record in records:
+        if record.get("type") == "session_meta":
             payload = record.get("payload", {})
-            payload_type = str(payload.get("type", ""))
-            ts = str(record.get("timestamp", ""))
+            session_id = str(payload.get("id", ""))
+            cwd = str(payload.get("cwd", ""))
+            break
 
-            if ts:
-                if not convo.first_timestamp or ts < convo.first_timestamp:
-                    convo.first_timestamp = ts
-                if not convo.last_timestamp or ts > convo.last_timestamp:
-                    convo.last_timestamp = ts
+    if not session_id:
+        session_id = jsonl_file.stem
 
-            if rtype == "event_msg" and payload_type == "user_message":
-                if current_turn is not None:
-                    convo.turns.append(_finalize_turn(convo, current_turn, len(convo.turns)))
-                user_text = str(payload.get("message", "")).strip()
-                if not convo.summary and user_text:
-                    convo.summary = user_text[:200]
+    convo = Conversation(
+        session_id=f"codex:{session_id}",
+        project=normalize_project(Path(cwd).name) if cwd else jsonl_file.stem,
+        branch="",
+        slug="",
+        source="codex",
+    )
+    current_turn: dict[str, Any] | None = None
+
+    for record in records:
+        rtype = str(record.get("type", ""))
+        payload = record.get("payload", {})
+        payload_type = str(payload.get("type", ""))
+        ts = str(record.get("timestamp", ""))
+
+        if ts:
+            if not convo.first_timestamp or ts < convo.first_timestamp:
+                convo.first_timestamp = ts
+            if not convo.last_timestamp or ts > convo.last_timestamp:
+                convo.last_timestamp = ts
+
+        if rtype == "event_msg" and payload_type == "user_message":
+            if current_turn is not None:
+                convo.turns.append(_finalize_turn(convo, current_turn, len(convo.turns), str(jsonl_file)))
+            user_text = str(payload.get("message", "")).strip()
+            if not convo.summary and user_text:
+                convo.summary = user_text[:200]
+            current_turn = {
+                "timestamp": ts,
+                "user_content": user_text,
+                "assistant_content": [],
+                "tool_results": [],
+                "records": [record],
+                "search_parts": [user_text] if user_text else [],
+                "signals": {"tools": [], "files": [], "commands": [], "errors": []},
+            }
+            continue
+
+        if rtype == "response_item" and payload_type == "message" and payload.get("role") == "assistant":
+            parsed = parse_codex_message_content(payload)
+            if current_turn is None:
                 current_turn = {
                     "timestamp": ts,
-                    "user_content": user_text,
+                    "user_content": None,
                     "assistant_content": [],
                     "tool_results": [],
-                    "records": [record],
-                    "search_parts": [user_text] if user_text else [],
+                    "records": [],
+                    "search_parts": [],
                     "signals": {"tools": [], "files": [], "commands": [], "errors": []},
                 }
-                continue
+            current_turn["assistant_content"].append(payload.get("content"))
+            current_turn["records"].append(record)
+            if parsed.text:
+                current_turn["search_parts"].append(parsed.text)
+            _merge_signal_lists(current_turn["signals"], parsed)
+            if not current_turn.get("timestamp") and ts:
+                current_turn["timestamp"] = ts
+            continue
 
-            if rtype == "response_item" and payload_type == "message" and payload.get("role") == "assistant":
-                parsed = parse_codex_message_content(payload.get("content"))
-                if current_turn is None:
-                    current_turn = {
-                        "timestamp": ts,
-                        "user_content": None,
-                        "assistant_content": [],
-                        "tool_results": [],
-                        "records": [],
-                        "search_parts": [],
-                        "signals": {"tools": [], "files": [], "commands": [], "errors": []},
-                    }
-                current_turn["assistant_content"].append(payload.get("content"))
-                current_turn["records"].append(record)
-                if parsed.text:
-                    current_turn["search_parts"].append(parsed.text)
-                _merge_signal_lists(current_turn["signals"], parsed)
-                if not current_turn.get("timestamp") and ts:
-                    current_turn["timestamp"] = ts
-                continue
+        if rtype == "response_item" and payload_type == "function_call":
+            parsed = parse_codex_function_call(payload)
+            if current_turn is None:
+                current_turn = {
+                    "timestamp": ts,
+                    "user_content": None,
+                    "assistant_content": [],
+                    "tool_results": [],
+                    "records": [],
+                    "search_parts": [],
+                    "signals": {"tools": [], "files": [], "commands": [], "errors": []},
+                }
+            current_turn["records"].append(record)
+            if parsed.text:
+                current_turn["search_parts"].append(parsed.text)
+            _merge_signal_lists(current_turn["signals"], parsed)
+            if not current_turn.get("timestamp") and ts:
+                current_turn["timestamp"] = ts
+            continue
 
-            if rtype == "response_item" and payload_type == "function_call":
-                parsed = parse_codex_function_call(payload)
-                if current_turn is None:
-                    current_turn = {
-                        "timestamp": ts,
-                        "user_content": None,
-                        "assistant_content": [],
-                        "tool_results": [],
-                        "records": [],
-                        "search_parts": [],
-                        "signals": {"tools": [], "files": [], "commands": [], "errors": []},
-                    }
-                current_turn["records"].append(record)
-                if parsed.text:
-                    current_turn["search_parts"].append(parsed.text)
-                _merge_signal_lists(current_turn["signals"], parsed)
-                if not current_turn.get("timestamp") and ts:
-                    current_turn["timestamp"] = ts
-                continue
+        if rtype == "response_item" and payload_type == "function_call_output":
+            parsed = parse_codex_function_output(payload)
+            if current_turn is None:
+                current_turn = {
+                    "timestamp": ts,
+                    "user_content": None,
+                    "assistant_content": [],
+                    "tool_results": [],
+                    "records": [],
+                    "search_parts": [],
+                    "signals": {"tools": [], "files": [], "commands": [], "errors": []},
+                }
+            current_turn["tool_results"].append(payload.get("output"))
+            current_turn["records"].append(record)
+            if parsed.text:
+                current_turn["search_parts"].append(parsed.text)
+            _merge_signal_lists(current_turn["signals"], parsed)
+            if not current_turn.get("timestamp") and ts:
+                current_turn["timestamp"] = ts
+            continue
 
-            if rtype == "response_item" and payload_type == "function_call_output":
-                parsed = parse_codex_function_output(payload)
-                if current_turn is None:
-                    current_turn = {
-                        "timestamp": ts,
-                        "user_content": None,
-                        "assistant_content": [],
-                        "tool_results": [],
-                        "records": [],
-                        "search_parts": [],
-                        "signals": {"tools": [], "files": [], "commands": [], "errors": []},
-                    }
-                current_turn["tool_results"].append(payload.get("output"))
-                current_turn["records"].append(record)
-                if parsed.text:
-                    current_turn["search_parts"].append(parsed.text)
-                _merge_signal_lists(current_turn["signals"], parsed)
-                if not current_turn.get("timestamp") and ts:
-                    current_turn["timestamp"] = ts
-                continue
+        if rtype == "response_item" and current_turn is not None:
+            fallback = ParsedContent(text=_dumps(payload)[:1200])
+            current_turn["records"].append(record)
+            if fallback.text:
+                current_turn["search_parts"].append(fallback.text)
 
-            if rtype == "response_item" and current_turn is not None:
-                fallback = ParsedContent(text=_dumps(payload)[:1200])
-                current_turn["records"].append(record)
-                if fallback.text:
-                    current_turn["search_parts"].append(fallback.text)
+    if current_turn is not None:
+        convo.turns.append(_finalize_turn(convo, current_turn, len(convo.turns), str(jsonl_file)))
 
-        if current_turn is not None:
-            convo.turns.append(_finalize_turn(convo, current_turn, len(convo.turns)))
+    if not convo.summary and convo.turns:
+        convo.summary = convo.turns[0].summary[:200]
 
-        if not convo.summary and convo.turns:
-            convo.summary = convo.turns[0].summary[:200]
+    if convo.turns:
+        index.conversations[convo.session_id] = convo
+        for turn in convo.turns:
+            index.turns.append(turn)
+            index.corpus.append(turn.search_text.lower().split())
 
-        if convo.turns:
-            idx.conversations[convo.session_id] = convo
-            for turn in convo.turns:
-                idx.turns.append(turn)
-                idx.corpus.append(turn.search_text.lower().split())
 
+def build_codex_index_from_files(jsonl_files: Iterable[Path]) -> tuple[Index, int]:
+    idx = Index()
+    for jsonl_file in sorted(set(jsonl_files), key=str):
+        _build_codex_index_from_file(jsonl_file, index=idx)
     return idx, len(idx.turns)
 
 
-def build_claude_index(base_dir: Path) -> tuple[Index, int]:
-    idx = Index()
-    if not base_dir.exists():
-        return idx, 0
+def build_codex_index(sessions_dir: Path) -> tuple[Index, int]:
+    if not sessions_dir.exists():
+        return Index(), 0
+    return build_codex_index_from_files(sessions_dir.rglob("*.jsonl"))
 
-    grouped: dict[str, list[tuple[dict[str, Any], str, str, str, str]]] = {}
-    fallback_counter = 0
 
-    for jsonl_file in base_dir.rglob("*.jsonl"):
-        project = extract_project(jsonl_file)
-        try:
-            with open(jsonl_file, encoding="utf-8") as handle:
-                for line in handle:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        record = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
+def _build_claude_index_from_file(
+    jsonl_file: Path,
+    grouped: dict[str, list[tuple[dict[str, Any], str, str, str, str, str]]],
+    fallback_counter: dict[str, int],
+) -> None:
+    project = extract_project(jsonl_file)
+    try:
+        with open(jsonl_file, encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
 
-                    rtype = str(record.get("type", ""))
-                    if rtype not in {"user", "assistant", "summary"}:
-                        continue
+                rtype = str(record.get("type", ""))
+                if rtype not in {"user", "assistant", "summary"}:
+                    continue
 
-                    sid = str(record.get("sessionId", ""))
-                    if not sid:
-                        sid = f"fallback:{jsonl_file.name}:{fallback_counter}"
-                        fallback_counter += 1
+                sid = str(record.get("sessionId", ""))
+                if not sid:
+                    sid = f"fallback:{jsonl_file.name}:{fallback_counter['value']}"
+                    fallback_counter["value"] += 1
 
-                    grouped.setdefault(sid, []).append(
-                        (
-                            record,
-                            project,
-                            str(record.get("gitBranch", "")),
-                            str(record.get("slug", "")),
-                            str(record.get("timestamp", "")),
-                        )
+                grouped.setdefault(sid, []).append(
+                    (
+                        record,
+                        project,
+                        str(record.get("gitBranch", "")),
+                        str(record.get("slug", "")),
+                        str(record.get("timestamp", "")),
+                        str(jsonl_file),
                     )
-        except OSError:
-            continue
+                )
+    except OSError:
+        return
 
+
+def _build_claude_index_from_rows(grouped: dict[str, list[tuple[dict[str, Any], str, str, str, str, str]]]) -> Index:
+    idx = Index()
     for session_id, rows in grouped.items():
         rows.sort(key=lambda row: row[4] or "")
         convo = Conversation(session_id=session_id, project="", branch="", slug="")
         current_turn: dict[str, Any] | None = None
 
-        for record, project, branch, slug, ts in rows:
+        for record, project, branch, slug, ts, source_file in rows:
             rtype = str(record.get("type", ""))
             if project and not convo.project:
                 convo.project = project
@@ -693,7 +706,7 @@ def build_claude_index(base_dir: Path) -> tuple[Index, int]:
                     continue
 
                 if current_turn is not None:
-                    convo.turns.append(_finalize_turn(convo, current_turn, len(convo.turns)))
+                    convo.turns.append(_finalize_turn(convo, current_turn, len(convo.turns), source_file))
 
                 if not convo.summary and parsed.text:
                     convo.summary = parsed.text[:200]
@@ -733,7 +746,7 @@ def build_claude_index(base_dir: Path) -> tuple[Index, int]:
                     current_turn["timestamp"] = ts
 
         if current_turn is not None:
-            convo.turns.append(_finalize_turn(convo, current_turn, len(convo.turns)))
+            convo.turns.append(_finalize_turn(convo, current_turn, len(convo.turns), source_file))
 
         if not convo.summary and convo.turns:
             convo.summary = convo.turns[0].summary[:200]
@@ -744,7 +757,196 @@ def build_claude_index(base_dir: Path) -> tuple[Index, int]:
             idx.corpus.append(turn.search_text.lower().split())
 
     idx.build()
+    return idx
+
+
+def build_claude_index_from_files(jsonl_files: Iterable[Path]) -> tuple[Index, int]:
+    grouped: dict[str, list[tuple[dict[str, Any], str, str, str, str, str]]] = {}
+    fallback_counter = {"value": 0}
+    for jsonl_file in sorted(set(jsonl_files), key=str):
+        _build_claude_index_from_file(jsonl_file, grouped=grouped, fallback_counter=fallback_counter)
+    idx = _build_claude_index_from_rows(grouped)
     return idx, len(idx.turns)
+
+
+def build_claude_index(base_dir: Path) -> tuple[Index, int]:
+    if not base_dir.exists():
+        return Index(), 0
+    return build_claude_index_from_files(base_dir.rglob("*.jsonl"))
+
+
+def rebuild_index_from_turns(
+    turns: list[Turn],
+    vectors: np.ndarray | None = None,
+) -> Index:
+    """Rebuild Index metadata from a list of turns and optional vector matrix."""
+    ordered_pairs: list[tuple[Turn, np.ndarray | None]] = []
+    if vectors is not None and vectors.shape[0] != len(turns):
+        vectors = None
+    for i, turn in enumerate(turns):
+        vector = vectors[i] if vectors is not None else None
+        ordered_pairs.append((turn, vector))
+
+    ordered_pairs.sort(key=lambda item: (item[0].session_id, item[0].timestamp or "", item[0].turn_number))
+    index = Index()
+
+    for turn, vector in ordered_pairs:
+        index.turns.append(turn)
+        index.corpus.append(turn.search_text.lower().split())
+
+        convo = index.conversations.get(turn.session_id)
+        if convo is None:
+            convo = Conversation(
+                session_id=turn.session_id,
+                project=turn.project,
+                branch=turn.branch,
+                slug=turn.slug,
+                source=turn.source,
+                summary=turn.summary,
+                first_timestamp=turn.timestamp,
+                last_timestamp=turn.timestamp,
+            )
+            index.conversations[turn.session_id] = convo
+        convo.turns.append(turn)
+        if turn.timestamp:
+            if not convo.first_timestamp or turn.timestamp < convo.first_timestamp:
+                convo.first_timestamp = turn.timestamp
+            if not convo.last_timestamp or turn.timestamp > convo.last_timestamp:
+                convo.last_timestamp = turn.timestamp
+
+    for convo in index.conversations.values():
+        convo.turns.sort(key=lambda t: (t.timestamp or "", t.turn_number))
+        if not convo.summary and convo.turns:
+            convo.summary = convo.turns[0].summary
+
+    index.build()
+    if vectors is not None:
+        if vectors.size == 0:
+            index.embeddings = np.empty((0, _EMBED_DIM), dtype=np.float32)
+        elif vectors.ndim == 1:
+            index.embeddings = vectors.reshape(1, -1)
+        elif vectors.shape[1] == _EMBED_DIM and vectors.shape[0] == len(index.turns):
+            index.embeddings = vectors.astype(np.float32)
+        else:
+            index.embeddings = np.array(
+                [
+                    embed_texts([turn.search_text[:2000] for turn in index.turns])[i]
+                    for i, _ in enumerate(index.turns)
+                ],
+                dtype=np.float32,
+            )
+    return index
+
+
+def rebuild_index_incrementally(
+    index: Index,
+    changed_files: set[str],
+    transcripts_dir: Path,
+    codex_dir: Path,
+) -> Index | None:
+    if not changed_files:
+        return index
+    _log(f"cache stale files: {len(changed_files)}")
+
+    changed_files_norm = {str(Path(path).resolve()) for path in changed_files}
+    if not index.turns:
+        return Index()
+    if not any(getattr(turn, "source_file", "") for turn in index.turns):
+        return None
+
+    has_cached_vectors = index.embeddings.ndim == 2 and index.embeddings.shape[0] == len(index.turns)
+    if not has_cached_vectors and index.turns:
+        _log("cache index missing aligned embeddings; will recompute vectors for rebuild")
+
+    cached_turn_vectors: dict[tuple[str, str, int], tuple[Turn, np.ndarray]] = {}
+    kept_turn_vectors: list[tuple[Turn, np.ndarray | None]] = []
+    for i, turn in enumerate(index.turns):
+        source_file = str(Path(turn.source_file).resolve()) if getattr(turn, "source_file", "") else ""
+        cached_vec = index.embeddings[i] if has_cached_vectors and source_file else None
+        if source_file and has_cached_vectors:
+            cached_turn_vectors[(source_file, turn.session_id, turn.turn_number)] = (turn, cached_vec)
+
+        if source_file in changed_files_norm:
+            continue
+        kept_turn_vectors.append((turn, cached_vec))
+
+    transcripts_root = transcripts_dir.resolve()
+    codex_root = codex_dir.resolve()
+
+    stale_claude_files = [
+        Path(path) for path in changed_files_norm if _path_within_root(Path(path), transcripts_root)
+    ]
+    stale_codex_files = [
+        Path(path) for path in changed_files_norm if _path_within_root(Path(path), codex_root)
+    ]
+
+    refreshed_turns: list[tuple[Turn, np.ndarray | None]] = []
+    if stale_claude_files:
+        stale_claude_idx, _ = build_claude_index_from_files(stale_claude_files)
+        for turn in stale_claude_idx.turns:
+            source_file = str(Path(turn.source_file).resolve()) if getattr(turn, "source_file", "") else ""
+            if not source_file:
+                refreshed_turns.append((turn, None))
+                continue
+            cached_match = cached_turn_vectors.get((source_file, turn.session_id, turn.turn_number))
+            if (
+                cached_match is not None
+                and cached_match[0].search_text == turn.search_text
+                and cached_match[1].shape == index.embeddings.shape[1:]
+            ):
+                cached_vec = cached_match[1]
+                refreshed_turns.append((turn, cached_vec))
+            else:
+                refreshed_turns.append((turn, None))
+    if stale_codex_files:
+        stale_codex_idx, _ = build_codex_index_from_files(stale_codex_files)
+        for turn in stale_codex_idx.turns:
+            source_file = str(Path(turn.source_file).resolve()) if getattr(turn, "source_file", "") else ""
+            if not source_file:
+                refreshed_turns.append((turn, None))
+                continue
+            cached_match = cached_turn_vectors.get((source_file, turn.session_id, turn.turn_number))
+            if (
+                cached_match is not None
+                and cached_match[0].search_text == turn.search_text
+                and cached_match[1].shape == index.embeddings.shape[1:]
+            ):
+                cached_vec = cached_match[1]
+                refreshed_turns.append((turn, cached_vec))
+            else:
+                refreshed_turns.append((turn, None))
+
+    combined: list[tuple[Turn, np.ndarray | None]] = list(kept_turn_vectors)
+    combined.extend(refreshed_turns)
+
+    if not combined:
+        return Index()
+
+    if not has_cached_vectors:
+        combined = [(turn, None) for turn, _ in combined]
+
+    missing_vector_indices = [idx for idx, pair in enumerate(combined) if pair[1] is None]
+    texts = [combined[idx][0].search_text[:2000] for idx in missing_vector_indices]
+    if texts:
+        _log(f"recomputing {len(texts)} embeddings for incremental rebuild")
+        new_vectors = [vec.astype(np.float32) for vec in embed_texts(texts)]
+        for target_idx, vec in zip(missing_vector_indices, new_vectors):
+            combined[target_idx] = (combined[target_idx][0], vec)
+
+    vectors = [pair[1] for pair in combined if pair[1] is not None]
+    if not vectors:
+        vectors_matrix = np.empty((0, _EMBED_DIM), dtype=np.float32)
+    else:
+        vectors_matrix = np.vstack(vectors)
+
+    return rebuild_index_from_turns([pair[0] for pair in combined], vectors=vectors_matrix)
+
+
+def _path_within_root(path: Path, root: Path) -> bool:
+    try:
+        return path.is_relative_to(root)
+    except ValueError:
+        return False
 
 
 class TranscriptIndexManager:
@@ -766,10 +968,10 @@ class TranscriptIndexManager:
         self._codex_sessions_dir = codex_dir
         self._watch_enabled = watch_enabled
 
-    def set_index(self, index: Index) -> None:
+    def set_index(self, index: Index, reindex_at: str | None = None) -> None:
         with self._index_lock:
             self._index = index
-            self._last_reindex_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            self._last_reindex_at = reindex_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         self._index_ready.set()
 
     def ensure_index(self) -> None:
