@@ -10,6 +10,7 @@ Options:
   --skip-cli         Skip CLI end-to-end checks (help, search, status, list)
   --tmp-dir PATH     Use existing temp dir for workspace
   --cache-dir PATH   Use existing cache directory (under tmp-dir by default)
+  --warm-search-repeats N   Repeat warm search loop N times (minimum 1)
   --keep-workdir     Do not delete temporary workspace
   --help             Show this message
 USAGE
@@ -20,6 +21,7 @@ RUN_CLI=1
 KEEP_WORKDIR=0
 TMP_WORKDIR=""
 CACHE_DIR_OVERRIDE=""
+WARM_SEARCH_REPEATS=4
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -42,6 +44,10 @@ while [[ $# -gt 0 ]]; do
     --keep-workdir)
       KEEP_WORKDIR=1
       shift
+      ;;
+    --warm-search-repeats)
+      WARM_SEARCH_REPEATS=$2
+      shift 2
       ;;
     --help|-h)
       usage
@@ -120,24 +126,28 @@ if [[ "${RUN_CLI}" -eq 1 ]]; then
   cat "${TMP_WORKDIR}/search1.stderr"
 
   log "search warmup #2 (cache reuse validation)"
+  for n in $(seq 2 "${WARM_SEARCH_REPEATS}"); do
   "${TIME_BIN}" -p "${UV_BIN}" run "${ALZABO_BIN}" \
     search "${QUERY}" \
     --transcripts-dir "${TRANSCRIPTS_DIR}" \
     --codex-dir "${CODEX_DIR}" \
     --cache-dir "${CACHE_DIR}" \
-    >"${TMP_WORKDIR}/search2.out" \
-    2>"${TMP_WORKDIR}/search2.stderr"
-  cat "${TMP_WORKDIR}/search2.stderr"
+    >"${TMP_WORKDIR}/search${n}.out" \
+    2>"${TMP_WORKDIR}/search${n}.stderr"
+  cat "${TMP_WORKDIR}/search${n}.stderr"
+  done
 
-  if ! grep -Eq "loading from cache|cache loaded" "${TMP_WORKDIR}/search2.stderr"; then
-    echo "FAIL: second search run did not show cache reuse"
+  for n in $(seq 2 "${WARM_SEARCH_REPEATS}"); do
+  if ! grep -Eq "loading from cache|cache loaded" "${TMP_WORKDIR}/search${n}.stderr"; then
+    echo "FAIL: search run #${n} did not show cache reuse"
     PASS=0
   fi
 
-  if grep -qi "loading embedding model" "${TMP_WORKDIR}/search2.stderr"; then
-    echo "FAIL: second search run shows embedding model load path"
+  if grep -qi "loading embedding model" "${TMP_WORKDIR}/search${n}.stderr"; then
+    echo "FAIL: search run #${n} shows embedding model load path"
     PASS=0
   fi
+  done
 
   log "status check"
   "${TIME_BIN}" -p "${UV_BIN}" run "${ALZABO_BIN}" \
