@@ -1,152 +1,56 @@
 # alzabo
 
-A CLI tool and MCP server for searching Claude Code and Codex JSONL transcripts with hybrid search (BM25 + vector).
+CLI tool for searching and exploring Claude Code and Codex session transcripts with hybrid search (BM25 + vector).
 
 ## Install
 
 ```bash
-uv tool install alzabo
+uv tool install git+https://github.com/zmackie-datadog/alzabo
 ```
 
-## CLI Usage
+## Usage
 
 ```bash
-alzabo search "oauth token refresh"         # search turns (text output)
-alzabo search "vector db" --sessions        # group results by session
-alzabo search "terraform" --format json     # JSON output
-alzabo list --format jsonl                  # list all sessions as JSONL
-alzabo read <session-id> --turn 0           # read a specific turn
-alzabo status                               # index stats
-alzabo serve                                # start MCP server
-alzabo extract --stats                      # tool call extraction stats
+alzabo search "oauth token refresh"         # search turns (BM25, fast)
+alzabo search "error handling" --mode hybrid # BM25 + vector (loads model, slower)
+alzabo search "vector db" --sessions         # group results by session
+alzabo search "terraform" --format json      # JSON output
+alzabo list --format jsonl                   # list all sessions as JSONL
+alzabo read <session-id> --turn 0            # read a specific turn
+alzabo read <session-id> --compact           # compact session view
+alzabo status                                # index stats
+alzabo reindex                               # rebuild index from source files
+alzabo extract --stats                       # tool call extraction stats
 ```
 
 ### Subcommands
 
 | Subcommand | Description |
 |---|---|
-| `search QUERY` | Search turns. `--sessions` groups by session. `--mode {hybrid,bm25,vector}`, `--context-window N` |
+| `search QUERY` | Search turns. `--sessions` groups by session. `--mode {hybrid,bm25,vector}` (default: bm25), `--context-window N` |
 | `list` | List conversations. `--source`, `--project`, `--start-date`, `--end-date`, `--offset`, `--limit` |
 | `read SESSION_ID` | Read a conversation. `--turn N` for a single turn. `--compact`, `--include-records` |
 | `status` | Show index stats: session counts, turn count, embeddings state, last reindex time |
-| `daemon-status` | Check whether a local resident `alzabo serve` process is active for the current cache scope |
-| `serve` | Start the MCP server. `--watch`/`--no-watch`, `--debounce-seconds` |
+| `reindex` | Rebuild the search index from source JSONL files |
 | `extract` | Extract structured tool call records. `--stats`, `--tool`, `--category`, `--errors-only` |
 
 ### Global flags
 
-These can be placed after the subcommand:
-
 - `--format {text,json,jsonl}`: output format (default: `text`)
-- `--no-cache`: skip disk cache, always reindex from source files
-- `--cache-dir`: override cache directory (defaults to `~/.cache/alzabo`)
+- `--cache-dir`: override cache directory (default: `~/.cache/alzabo`)
 - `--transcripts-dir`: Claude transcript directory (default: `~/.claude/projects`)
 - `--codex-dir`: Codex session directory (default: `~/.codex/sessions`)
 - `--quiet`: suppress progress logs for cleaner LLM/agent consumption
 
-When `alzabo serve` is running, other `alzabo` commands can reuse that resident daemon via local IPC when run with the same `--cache-dir`/directories. In that mode, commands avoid local cold-cache rebuilding and return from the in-memory index directly.
-
-If no daemon is running, non-`daemon` subcommands will start one in the background on first use and reuse it on subsequent commands (same `--cache-dir` and transcript directories). Add `--no-daemon` to force local execution and skip auto-start.
-
 ### Disk cache
 
-On first run, alzabo indexes all transcripts and saves a cache to `~/.cache/alzabo/`. Subsequent runs load from cache if no source files have changed, making startup near-instant. Use `--no-cache` to force a fresh reindex.
+alzabo builds a pickle-based index on first `reindex` and saves it to `~/.cache/alzabo/`. Search loads the cache as-is and never reindexes automatically -- run `alzabo reindex` explicitly when you want fresh data.
 
-You can verify cache reuse with:
+## Search modes
 
-```bash
-python scripts/verify_cache.py \
-  --binary alzabo \
-  --cache-dir /tmp/alzabo-cache-verify \
-  --output-dir /tmp/alzabo-cache-verify/run
-```
-
-Artifacts are written under `--output-dir` (`run1.stdout`, `run1.stderr`, `run2.stdout`, `run2.stderr`, `summary.json`).
-`summary.json` includes `cache_reused` and per-run return codes.
-
-## MCP Server
-
-### Claude Code config
-
-Add to `~/.claude/.mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "alzabo": {
-      "command": "uvx",
-      "args": ["alzabo", "serve"]
-    }
-  }
-}
-```
-
-To test the local checkout instead of a published tool, use an absolute project path:
-
-```json
-{
-  "mcpServers": {
-    "alzabo": {
-      "command": "uvx",
-      "args": ["--directory", "/absolute/path/to/alzabo", "--from", ".", "alzabo", "serve"]
-    }
-  }
-}
-```
-
-You can also install the repo in editable mode so `which alzabo` resolves to this checkout:
-
-```bash
-cd /absolute/path/to/alzabo
-uv tool install -e .
-```
-
-Then configure MCP to run the binary directly:
-
-```json
-{
-  "mcpServers": {
-    "alzabo": {
-      "command": "alzabo",
-      "args": ["serve"]
-    }
-  }
-}
-```
-
-Either approach works for `alzabo serve`; both still expose the same MCP tools and preserve the old `alzabo-serve` compatibility entry point.
-
-You can also bypass `uvx` on each run by invoking `uv` directly:
-
-```json
-{
-  "mcpServers": {
-    "alzabo": {
-      "command": "uv",
-      "args": ["run", "--project", "/absolute/path/to/alzabo", "alzabo", "serve"]
-    }
-  }
-}
-```
-
-After updating your MCP config, restart the MCP host and then verify:
-
-```bash
-uvx --directory /absolute/path/to/alzabo --from . alzabo --help
-```
-
-### MCP tools
-
-All tools return plain text.
-
-| Tool | Description |
-|------|-------------|
-| `search_conversations(query, ...)` | Search individual turns with optional inline context turns |
-| `search_sessions(query, ...)` | Search grouped by session |
-| `list_conversations(...)` | Browse indexed sessions with compact metadata |
-| `read_turn(session_id, turn_number, ...)` | Read a single turn, including extracted signals |
-| `read_conversation(session_id, ...)` | Read a conversation sequentially |
-| `index_status()` | Report index counts, directories, watch state, and last reindex time |
+- `bm25` (default): keyword-only search, fast
+- `hybrid`: Reciprocal Rank Fusion of BM25 and vector search (loads `model2vec` embeddings on first use)
+- `vector`: semantic search using `model2vec`
 
 ## What gets indexed
 
@@ -154,12 +58,6 @@ All tools return plain text.
 - Claude `tool_use` inputs and `tool_result` payloads
 - Codex function-call arguments and `function_call_output` payloads
 - Extracted signals per turn: tools, file paths, shell commands, and error snippets
-
-## Search modes
-
-- `hybrid`: Reciprocal Rank Fusion of BM25 and vector search (default)
-- `bm25`: keyword-only search
-- `vector`: semantic search using `model2vec`
 
 ## Data sources
 
@@ -175,24 +73,10 @@ Codex session IDs are prefixed with `codex:` to avoid collisions with Claude ses
 | Command | Target | Purpose |
 |---|---|---|
 | `alzabo` | `alzabo.main_cli:main` | Unified CLI with subcommands |
-| `alzabo-serve` | `alzabo.cli:main` | Backward-compat MCP server (same as `alzabo serve`) |
 | `alzabo-extract` | `alzabo.extract_cli:main` | Standalone extraction tool |
 
 ## Development
 
 ```bash
-uv run pytest
+uv run pytest tests/ -v
 ```
-
-Project layout:
-
-- `src/alzabo/main_cli.py`: unified CLI entry point with subparsers
-- `src/alzabo/cli.py`: MCP server startup, watcher wiring
-- `src/alzabo/server.py`: MCP tool definitions
-- `src/alzabo/index.py`: indexing, ranking, state management
-- `src/alzabo/parsers.py`: transcript parsing and signal extraction
-- `src/alzabo/render.py`: plain-text output formatting
-- `src/alzabo/output.py`: output format dispatch (text/json/jsonl)
-- `src/alzabo/cache.py`: disk cache for fast startup
-- `src/alzabo/extract.py`: structured tool call extraction
-- `src/alzabo/extract_cli.py`: standalone extract CLI

@@ -31,9 +31,9 @@ alzabo = "alzabo.main_cli:main"
 alzabo-extract = "alzabo.extract_cli:main"
 
 [project.urls]
-Homepage = "https://github.com/DataDog/alzabo"
-Repository = "https://github.com/DataDog/alzabo"
-Issues = "https://github.com/DataDog/alzabo/issues"
+Homepage = "https://github.com/zmackie-datadog/alzabo"
+Repository = "https://github.com/zmackie-datadog/alzabo"
+Issues = "https://github.com/zmackie-datadog/alzabo/issues"
 
 [dependency-groups]
 dev = ["pytest"]
