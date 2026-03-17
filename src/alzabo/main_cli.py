@@ -311,8 +311,18 @@ def cmd_extract(args: argparse.Namespace) -> None:
     )
 
 
+def _get_version() -> str:
+    from importlib.metadata import version, PackageNotFoundError
+
+    try:
+        return version("alzabo")
+    except PackageNotFoundError:
+        return "0.0.0-dev"
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="alzabo", description="Search and explore Claude Code and Codex transcripts.")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {_get_version()}")
 
     # Shared parent with global flags — lets them appear before or after subcommand
     shared = argparse.ArgumentParser(add_help=False)
