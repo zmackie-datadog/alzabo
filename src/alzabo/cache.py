@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import pickle
 import sys
 import time
 from pathlib import Path
@@ -15,11 +16,10 @@ from .index import (
     Conversation,
     Index,
     Turn,
-    TurnSignals,
     _EMBED_DIM,
 )
 
-CACHE_VERSION = 2
+CACHE_VERSION = 3
 CACHE_DIR = Path.home() / ".cache" / "alzabo"
 _LOG_ENABLED = True
 
@@ -49,6 +49,26 @@ def _log(msg: str) -> None:
     print(f"[alzabo {ts}] {msg}", file=sys.stderr)
 
 
+def _read_manifest() -> dict[str, Any] | None:
+    manifest_path = CACHE_DIR / "manifest.json"
+    if not manifest_path.exists():
+        return None
+    try:
+        return json.loads(manifest_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _parse_iso_datetime(value: str) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 def _file_signature(path: Path) -> dict[str, Any]:
     stat = path.stat()
     return {
@@ -71,6 +91,54 @@ def _normalize_manifest_entry(value: Any) -> tuple[float, int | None] | None:
     if isinstance(value, (int, float)):
         return (float(value), None)
     return None
+
+
+def is_cache_recently_checked(
+    manifest: dict[str, Any],
+    debounce_seconds: float,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Return whether cache was recently checked using a fast metadata timestamp."""
+    if debounce_seconds <= 0:
+        return False
+    checked_at = manifest.get("cache_checked_at")
+    if not isinstance(checked_at, str):
+        return False
+    checked = _parse_iso_datetime(checked_at)
+    if checked is None:
+        return False
+
+    reference = now or datetime.now(timezone.utc)
+    if reference.tzinfo is None:
+        reference = reference.replace(tzinfo=timezone.utc)
+    age_seconds = (reference - checked).total_seconds()
+    return 0 <= age_seconds <= debounce_seconds
+
+
+def touch_cache_checked_at(
+    transcripts_dir: Path,
+    codex_dir: Path,
+    *,
+    checked_at: str | None = None,
+) -> None:
+    """Update manifest's cache_checked_at without rebuilding turns or embeddings."""
+    manifest = _read_manifest()
+    if manifest is None:
+        return
+    if manifest.get("version") != CACHE_VERSION:
+        return
+    if manifest.get("transcripts_dir") != str(transcripts_dir):
+        return
+    if manifest.get("codex_dir") != str(codex_dir):
+        return
+
+    manifest["cache_checked_at"] = checked_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    manifest_path = CACHE_DIR / "manifest.json"
+    try:
+        manifest_path.write_text(json.dumps(manifest, indent=2))
+    except OSError as e:
+        _log(f"cache manifest update failed: {e}")
 
 
 def collect_source_files(transcripts_dir: Path, codex_dir: Path) -> dict[str, dict[str, Any]]:
@@ -160,21 +228,77 @@ def partition_changed_files_by_stability(
     return settled, unstable
 
 
+def _slim_turn(turn: Turn) -> Turn:
+    """Create a slim copy of a turn, stripping heavy content fields."""
+    return Turn(
+        session_id=turn.session_id,
+        turn_number=turn.turn_number,
+        timestamp=turn.timestamp,
+        project=turn.project,
+        branch=turn.branch,
+        slug=turn.slug,
+        source=turn.source,
+        user_content=None,
+        assistant_content=[],
+        tool_results=[],
+        summary=turn.summary,
+        signals=turn.signals,
+        records=[],
+        search_text="",
+        source_file=turn.source_file,
+    )
+
+
+def _slim_index(index: Index) -> Index:
+    """Create a slim copy of the index for caching.
+
+    Strips heavy content from turns and drops corpus (baked into BM25).
+    BM25 must already be built on the original index.
+    """
+    slim = Index()
+    slim.bm25 = index.bm25  # pre-built, included in pickle
+    slim.embeddings = index.embeddings  # saved separately as .npy
+
+    for convo in index.conversations.values():
+        slim_convo = Conversation(
+            session_id=convo.session_id,
+            project=convo.project,
+            branch=convo.branch,
+            slug=convo.slug,
+            source=convo.source,
+            summary=convo.summary,
+            first_timestamp=convo.first_timestamp,
+            last_timestamp=convo.last_timestamp,
+        )
+        for turn in convo.turns:
+            slim_turn = _slim_turn(turn)
+            slim_convo.turns.append(slim_turn)
+            slim.turns.append(slim_turn)
+        slim.conversations[convo.session_id] = slim_convo
+
+    # corpus is intentionally empty — BM25 is pre-built
+    return slim
+
+
 def load_cache_bundle() -> tuple[Index, dict[str, Any]] | None:
     """Load cache index and manifest if both files are valid."""
     try:
         manifest_path = CACHE_DIR / "manifest.json"
-        turns_path = CACHE_DIR / "turns.json"
+        index_path = CACHE_DIR / "index.pkl"
         embeddings_path = CACHE_DIR / "embeddings.npy"
-        if not manifest_path.exists() or not turns_path.exists() or not embeddings_path.exists():
+        if not manifest_path.exists() or not index_path.exists() or not embeddings_path.exists():
             return None
 
         manifest = json.loads(manifest_path.read_text())
         if manifest.get("version") != CACHE_VERSION:
             return None
 
-        data = json.loads(turns_path.read_text())
-        index = _deserialize_index(data)
+        with open(index_path, "rb") as f:
+            index = pickle.load(f)
+
+        if not isinstance(index, Index):
+            _log("cache index.pkl is not an Index instance")
+            return None
 
         embeddings = np.load(str(embeddings_path))
         if embeddings.shape[0] == len(index.turns) and (embeddings.ndim == 1 or embeddings.shape[1] == _EMBED_DIM):
@@ -182,7 +306,7 @@ def load_cache_bundle() -> tuple[Index, dict[str, Any]] | None:
         elif embeddings.shape[0] > 0:
             _log(f"cache embeddings shape mismatch: {embeddings.shape} vs {len(index.turns)} turns, skipping")
 
-        index.build()
+        # BM25 is pre-built in the pickle — no index.build() needed
         _log(f"cache loaded ({len(index.turns)} turns)")
         return index, manifest
     except Exception as e:
@@ -191,12 +315,8 @@ def load_cache_bundle() -> tuple[Index, dict[str, Any]] | None:
 
 
 def is_cache_fresh(transcripts_dir: Path, codex_dir: Path) -> bool:
-    manifest_path = CACHE_DIR / "manifest.json"
-    if not manifest_path.exists():
-        return False
-    try:
-        manifest = json.loads(manifest_path.read_text())
-    except (json.JSONDecodeError, OSError):
+    manifest = _read_manifest()
+    if manifest is None:
         return False
 
     if manifest.get("version") != CACHE_VERSION:
@@ -214,15 +334,26 @@ def is_cache_fresh(transcripts_dir: Path, codex_dir: Path) -> bool:
 def save_cache(index: Index, transcripts_dir: Path, codex_dir: Path, *, reindex_at: str | None = None) -> None:
     try:
         CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        # Serialize turns grouped by conversation
-        data = _serialize_index(index)
-        turns_path = CACHE_DIR / "turns.json"
-        turns_path.write_text(json.dumps(data, separators=(",", ":")))
+        # Ensure BM25 is built before slimming
+        if index.bm25 is None and index.corpus:
+            index.build()
+
+        # Create slim copy and pickle it
+        slim = _slim_index(index)
+        index_path = CACHE_DIR / "index.pkl"
+        with open(index_path, "wb") as f:
+            pickle.dump(slim, f, protocol=pickle.HIGHEST_PROTOCOL)
 
         # Save embeddings
         embeddings_path = CACHE_DIR / "embeddings.npy"
         np.save(str(embeddings_path), index.embeddings)
+
+        # Clean up old v2 turns.json if present
+        old_turns = CACHE_DIR / "turns.json"
+        if old_turns.exists():
+            old_turns.unlink()
 
         # Write manifest last (commit marker)
         manifest = {
@@ -231,7 +362,8 @@ def save_cache(index: Index, transcripts_dir: Path, codex_dir: Path, *, reindex_
             "codex_dir": str(codex_dir),
             "source_files": collect_source_files(transcripts_dir, codex_dir),
             "turn_count": len(index.turns),
-            "reindex_at": reindex_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "reindex_at": reindex_at or now,
+            "cache_checked_at": now,
         }
         manifest_path = CACHE_DIR / "manifest.json"
         manifest_path.write_text(json.dumps(manifest, indent=2))
@@ -245,87 +377,3 @@ def load_cache() -> Index | None:
     if bundle is None:
         return None
     return bundle[0]
-
-
-def _serialize_index(index: Index) -> list[dict[str, Any]]:
-    """Serialize conversations with nested turns."""
-    convos: list[dict[str, Any]] = []
-    for convo in index.conversations.values():
-        turns_data = []
-        for turn in convo.turns:
-            turns_data.append({
-                "turn_number": turn.turn_number,
-                "timestamp": turn.timestamp,
-                "user_content": turn.user_content,
-                "assistant_content": turn.assistant_content,
-                "tool_results": turn.tool_results,
-                "summary": turn.summary,
-                "search_text": turn.search_text,
-                "records": turn.records,
-                "source_file": turn.source_file,
-                "signals": {
-                    "tools": turn.signals.tools,
-                    "files": turn.signals.files,
-                    "commands": turn.signals.commands,
-                    "errors": turn.signals.errors,
-                },
-            })
-        convos.append({
-            "session_id": convo.session_id,
-            "project": convo.project,
-            "branch": convo.branch,
-            "slug": convo.slug,
-            "source": convo.source,
-            "summary": convo.summary,
-            "first_timestamp": convo.first_timestamp,
-            "last_timestamp": convo.last_timestamp,
-            "turns": turns_data,
-        })
-    return convos
-
-
-def _deserialize_index(data: list[dict[str, Any]]) -> Index:
-    """Reconstruct Index from serialized data."""
-    index = Index()
-    for convo_data in data:
-        convo = Conversation(
-            session_id=convo_data["session_id"],
-            project=convo_data.get("project", ""),
-            branch=convo_data.get("branch", ""),
-            slug=convo_data.get("slug", ""),
-            source=convo_data.get("source", "claude"),
-            summary=convo_data.get("summary", ""),
-            first_timestamp=convo_data.get("first_timestamp", ""),
-            last_timestamp=convo_data.get("last_timestamp", ""),
-        )
-        for turn_data in convo_data.get("turns", []):
-            signals_data = turn_data.get("signals", {})
-            signals = TurnSignals(
-                tools=signals_data.get("tools", []),
-                files=signals_data.get("files", []),
-                commands=signals_data.get("commands", []),
-                errors=signals_data.get("errors", []),
-            )
-            turn = Turn(
-                session_id=convo.session_id,
-                turn_number=turn_data["turn_number"],
-                timestamp=turn_data.get("timestamp", ""),
-                project=convo.project,
-                branch=convo.branch,
-                slug=convo.slug,
-                source=convo.source,
-                user_content=turn_data.get("user_content"),
-                assistant_content=turn_data.get("assistant_content", []),
-                tool_results=turn_data.get("tool_results", []),
-                summary=turn_data.get("summary", ""),
-                signals=signals,
-                records=turn_data.get("records", []),
-                search_text=turn_data.get("search_text", ""),
-                source_file=turn_data.get("source_file", ""),
-            )
-            convo.turns.append(turn)
-            index.turns.append(turn)
-            index.corpus.append(turn.search_text.lower().split())
-
-        index.conversations[convo.session_id] = convo
-    return index

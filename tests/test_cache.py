@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import datetime
 
 import numpy as np
 import pytest
@@ -24,6 +25,7 @@ def _make_index(turn_count: int = 3) -> idxmod.Index:
             user_content=f"question {i}", assistant_content=[{"type": "text", "text": f"answer {i}"}],
             tool_results=[], summary=f"turn {i}", signals=idxmod.TurnSignals(tools=["Read"] if i == 0 else []),
             records=[], search_text=f"question {i} answer {i}",
+            source_file="/tmp/test.jsonl",
         )
         convo.turns.append(turn)
         idx.turns.append(turn)
@@ -56,13 +58,17 @@ class TestCacheRoundtrip:
         assert len(loaded.conversations) == len(original.conversations)
         assert loaded.bm25 is not None
 
-        # Verify turn content preserved
+        # Slim cache strips content but preserves metadata
         for orig_t, load_t in zip(original.turns, loaded.turns):
             assert orig_t.session_id == load_t.session_id
             assert orig_t.turn_number == load_t.turn_number
             assert orig_t.summary == load_t.summary
-            assert orig_t.user_content == load_t.user_content
             assert orig_t.signals.tools == load_t.signals.tools
+            assert load_t.source_file == orig_t.source_file
+            # Content is stripped in slim cache
+            assert load_t.user_content is None
+            assert load_t.assistant_content == []
+            assert load_t.search_text == ""
 
     def test_load_cache_bundle(self, tmp_path):
         transcripts = tmp_path / "claude"
@@ -94,6 +100,40 @@ class TestCacheRoundtrip:
         assert loaded is not None
         assert loaded.embeddings.shape == original.embeddings.shape
         np.testing.assert_allclose(loaded.embeddings, original.embeddings, atol=1e-6)
+
+    def test_bm25_prebuilt_in_cache(self, tmp_path):
+        """BM25 should be pre-built in the pickle, no rebuild needed."""
+        transcripts = tmp_path / "claude"
+        codex = tmp_path / "codex"
+        transcripts.mkdir()
+        codex.mkdir()
+
+        original = _make_index(3)
+        cache_mod.save_cache(original, transcripts, codex)
+
+        bundle = cache_mod.load_cache_bundle()
+        assert bundle is not None
+        loaded, _ = bundle
+
+        # BM25 should be ready to use without calling build()
+        assert loaded.bm25 is not None
+        # "answer 0" only appears in turn 0, so scores should be non-uniform
+        scores = loaded.bm25.get_scores(["answer", "0"])
+        assert scores[0] != scores[1], f"BM25 should discriminate: {scores}"
+
+    def test_pickle_format_used(self, tmp_path):
+        """Verify cache uses index.pkl not turns.json."""
+        transcripts = tmp_path / "claude"
+        codex = tmp_path / "codex"
+        transcripts.mkdir()
+        codex.mkdir()
+
+        original = _make_index(1)
+        cache_mod.save_cache(original, transcripts, codex)
+
+        assert (cache_mod.CACHE_DIR / "index.pkl").exists()
+        assert (cache_mod.CACHE_DIR / "embeddings.npy").exists()
+        assert not (cache_mod.CACHE_DIR / "turns.json").exists()
 
 
 class TestCacheManifest:
@@ -176,6 +216,49 @@ class TestCacheManifest:
         assert "mtime" in file_meta
         assert "size" in file_meta
 
+    def test_cache_checked_timestamp_refreshes_without_rewrite(self, tmp_path):
+        transcripts = tmp_path / "claude"
+        codex = tmp_path / "codex"
+        transcripts.mkdir()
+        codex.mkdir()
+
+        idx = _make_index(1)
+        cache_mod.save_cache(idx, transcripts, codex)
+
+        manifest_path = cache_mod.CACHE_DIR / "manifest.json"
+        index_path = cache_mod.CACHE_DIR / "index.pkl"
+        manifest_early = json.loads(manifest_path.read_text())
+        index_bytes_early = index_path.read_bytes()
+        first_checked_at = manifest_early["cache_checked_at"]
+
+        cache_mod.touch_cache_checked_at(transcripts, codex, checked_at="2026-01-01T00:00:01Z")
+
+        manifest_late = json.loads(manifest_path.read_text())
+        index_bytes_late = index_path.read_bytes()
+        assert manifest_late["cache_checked_at"] == "2026-01-01T00:00:01Z"
+        assert manifest_late["cache_checked_at"] != first_checked_at
+        assert index_bytes_late == index_bytes_early
+
+    def test_cache_recently_checked(self):
+        manifest = {"cache_checked_at": "2026-01-01T00:00:00Z"}
+        checked = cache_mod.is_cache_recently_checked(
+            manifest,
+            30.0,
+            now=datetime.fromisoformat("2026-01-01T00:00:20+00:00"),
+        )
+        assert checked is True
+
+        stale = cache_mod.is_cache_recently_checked(
+            manifest,
+            10.0,
+            now=datetime.fromisoformat("2026-01-01T00:00:20+00:00"),
+        )
+        assert stale is False
+
+        never = cache_mod.is_cache_recently_checked(
+            manifest, 10.0, now=datetime.fromisoformat("2025-01-01T00:00:00+00:00")
+        )
+        assert never is False
 
 class TestCacheStaleness:
     def test_fresh_cache(self, tmp_path):
@@ -233,12 +316,12 @@ class TestCacheStaleness:
 
 
 class TestCacheCorruption:
-    def test_corrupt_turns_json(self, tmp_path):
+    def test_corrupt_index_pkl(self, tmp_path):
         cache_dir = tmp_path / "cache"
         cache_dir.mkdir(parents=True)
-        (cache_dir / "turns.json").write_text("not valid json{{{")
+        (cache_dir / "index.pkl").write_text("not valid pickle{{{")
         (cache_dir / "embeddings.npy").write_bytes(b"")
-        (cache_dir / "manifest.json").write_text("{}")
+        (cache_dir / "manifest.json").write_text(json.dumps({"version": cache_mod.CACHE_VERSION}))
 
         result = cache_mod.load_cache()
         assert result is None
@@ -246,7 +329,7 @@ class TestCacheCorruption:
     def test_missing_embeddings(self, tmp_path):
         cache_dir = tmp_path / "cache"
         cache_dir.mkdir(parents=True)
-        (cache_dir / "turns.json").write_text("[]")
+        (cache_dir / "index.pkl").write_bytes(b"")
         # No embeddings.npy
 
         result = cache_mod.load_cache()
@@ -272,3 +355,32 @@ class TestSetIndex:
         status = manager.get_index_status()
         assert status.total_turns == 2
         assert status.total_sessions == 1
+
+
+class TestSlimIndex:
+    def test_slim_turn_strips_content(self):
+        turn = idxmod.Turn(
+            session_id="s1", turn_number=0, timestamp="2026-01-01T00:00:00Z",
+            project="proj", branch="main", slug="test", source="claude",
+            user_content="big question", assistant_content=[{"type": "text", "text": "big answer"}],
+            tool_results=[{"output": "big result"}], summary="short summary",
+            signals=idxmod.TurnSignals(tools=["Read"]), records=[{"some": "record"}],
+            search_text="big question big answer", source_file="/tmp/test.jsonl",
+        )
+        slim = cache_mod._slim_turn(turn)
+        assert slim.user_content is None
+        assert slim.assistant_content == []
+        assert slim.tool_results == []
+        assert slim.records == []
+        assert slim.search_text == ""
+        assert slim.summary == "short summary"
+        assert slim.signals.tools == ["Read"]
+        assert slim.source_file == "/tmp/test.jsonl"
+
+    def test_slim_index_preserves_structure(self):
+        idx = _make_index(3)
+        slim = cache_mod._slim_index(idx)
+        assert len(slim.turns) == 3
+        assert len(slim.conversations) == 1
+        assert slim.bm25 is not None
+        assert slim.corpus == []  # corpus stripped

@@ -25,6 +25,11 @@ class TestParser:
         args = parser.parse_args(["search", "test", "--sessions"])
         assert args.sessions is True
 
+    def test_search_default_mode_is_bm25(self):
+        parser = build_parser()
+        args = parser.parse_args(["search", "test"])
+        assert args.mode == "bm25"
+
     def test_list_parses(self):
         parser = build_parser()
         args = parser.parse_args(["list", "--format", "json", "--offset", "10"])
@@ -49,6 +54,11 @@ class TestParser:
         args = parser.parse_args(["status", "--no-cache"])
         assert args.command == "status"
         assert args.no_cache is True
+
+    def test_reindex_parses(self):
+        parser = build_parser()
+        args = parser.parse_args(["reindex"])
+        assert args.command == "reindex"
 
     def test_extract_parses(self):
         parser = build_parser()
@@ -76,12 +86,6 @@ class TestParser:
         parser = build_parser()
         args = parser.parse_args(["status", "--cache-dir", "/tmp/alzabo-cache-test"])
         assert args.cache_dir == "/tmp/alzabo-cache-test"
-
-    def test_global_debounce_seconds(self):
-        parser = build_parser()
-        args = parser.parse_args(["status"])
-        assert args.debounce_seconds == 2.0
-
 
 
 class TestCacheConfig:
@@ -165,7 +169,6 @@ class TestCacheBypass:
         parser = build_parser()
         args = parser.parse_args([
             "status",
-            "--debounce-seconds", "0",
             "--transcripts-dir", str(transcripts),
             "--codex-dir", str(codex),
         ])
@@ -194,7 +197,6 @@ class TestCacheBypass:
         parser = build_parser()
         args = parser.parse_args([
             "status",
-            "--debounce-seconds", "0",
             "--transcripts-dir", str(transcripts),
             "--codex-dir", str(codex),
         ])
@@ -204,330 +206,43 @@ class TestCacheBypass:
         _get_manager(args)
         assert embed_calls == []
 
-
-class TestIncrementalCache:
-    @pytest.fixture(autouse=True)
-    def override_cache_dir(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(cache_mod, "CACHE_DIR", tmp_path / "cache")
-
-    def test_stale_cache_with_unstable_changes_uses_existing_cache(self, tmp_path, monkeypatch):
+    def test_stale_cache_still_loads_without_reindex(self, tmp_path, monkeypatch):
+        """With the simplified _get_manager, even stale cache loads without reindexing."""
         transcripts = tmp_path / "claude"
         codex = tmp_path / "codex"
         transcripts.mkdir()
         codex.mkdir()
 
-        session_file = transcripts / "session.jsonl"
-        session_file.write_text(
-            "\n".join(
-                [
-                    json.dumps(
-                        {
-                            "type": "user",
-                            "sessionId": "session-1",
-                            "timestamp": "2026-01-01T00:00:00Z",
-                            "message": {"content": "first question"},
-                        }
-                    ),
-                    json.dumps(
-                        {
-                            "type": "assistant",
-                            "sessionId": "session-1",
-                            "timestamp": "2026-01-01T00:01:00Z",
-                            "message": {"content": [{"type": "text", "text": "first answer"}]},
-                        }
-                    ),
-                ]
-            )
-            + "\n"
-        )
+        idx = idxmod.Index()
+        idx.build()
+        idx.embeddings = np.empty((0, 512), dtype=np.float32)
+        cache_mod.save_cache(idx, transcripts, codex)
 
-        cached_index, _ = idxmod.build_claude_index(transcripts)
-        cache_mod.save_cache(cached_index, transcripts, codex)
+        # Add a new file to make cache "stale"
+        (transcripts / "new.jsonl").write_text('{"type":"user"}\n')
 
-        session_file.write_text(
-            session_file.read_text()
-            + "\n".join(
-                [
-                    json.dumps(
-                        {
-                            "type": "user",
-                            "sessionId": "session-1",
-                            "timestamp": "2026-01-01T00:02:00Z",
-                            "message": {"content": "second question"},
-                        }
-                    ),
-                    json.dumps(
-                        {
-                            "type": "assistant",
-                            "sessionId": "session-1",
-                            "timestamp": "2026-01-01T00:02:01Z",
-                            "message": {"content": [{"type": "text", "text": "second answer"}]},
-                        }
-                    ),
-                ]
-            )
-        )
+        reindex_calls = []
+        original_reindex = idxmod.TranscriptIndexManager.reindex
 
-        current_files = cache_mod.collect_source_files(transcripts, codex)
-        unstable_now = current_files[str(session_file.resolve())]["mtime"] + 0.5
-        monkeypatch.setattr(cache_mod.time, "time", lambda: unstable_now)
+        def tracking_reindex(self):
+            reindex_calls.append(True)
+            return original_reindex(self)
 
-        def fail_rebuild(
-            index: idxmod.Index,
-            changed_files: set[str],
-            transcripts_dir: Path,
-            codex_dir: Path,
-        ) -> idxmod.Index:
-            raise AssertionError("incremental rebuild should not run while changes are unstable")
-
-        def fail_reindex(self) -> int:
-            raise AssertionError("full reindex should not run while changes are unstable")
-
-        monkeypatch.setattr(idxmod, "rebuild_index_incrementally", fail_rebuild)
-        monkeypatch.setattr(idxmod.TranscriptIndexManager, "reindex", fail_reindex)
+        monkeypatch.setattr(idxmod.TranscriptIndexManager, "reindex", tracking_reindex)
 
         parser = build_parser()
         args = parser.parse_args([
             "status",
-            "--transcripts-dir", str(transcripts),
-            "--codex-dir", str(codex),
-            "--debounce-seconds", "10",
-        ])
-
-        from alzabo.main_cli import _get_manager
-
-        manager = _get_manager(args)
-        assert manager.get_index_status().total_turns == 1
-
-    def test_stale_cache_uses_incremental_update(self, tmp_path, monkeypatch):
-        transcripts = tmp_path / "claude"
-        codex = tmp_path / "codex"
-        project_dir = transcripts / "test-project"
-        project_dir.mkdir(parents=True)
-        codex.mkdir()
-
-        session_file = project_dir / "session.jsonl"
-        session_file.write_text(
-            "\n".join(
-                [
-                    json.dumps(
-                        {
-                            "type": "user",
-                            "sessionId": "session-1",
-                            "timestamp": "2026-01-01T00:00:00Z",
-                            "message": {"content": "first question"},
-                        }
-                    ),
-                    json.dumps(
-                        {
-                            "type": "assistant",
-                            "sessionId": "session-1",
-                            "timestamp": "2026-01-01T00:00:01Z",
-                            "message": {"content": [{"type": "text", "text": "first answer"}]},
-                        }
-                    ),
-                ]
-            )
-            + "\n"
-        )
-
-        cached_index, _ = idxmod.build_claude_index(transcripts)
-        cache_mod.save_cache(cached_index, transcripts, codex, reindex_at="2026-01-01T00:00:00Z")
-
-        session_file.write_text(
-            session_file.read_text()
-            + "\n".join(
-                [
-                    json.dumps(
-                        {
-                            "type": "user",
-                            "sessionId": "session-1",
-                            "timestamp": "2026-01-01T00:01:00Z",
-                            "message": {"content": "second question"},
-                        }
-                    ),
-                    json.dumps(
-                        {
-                            "type": "assistant",
-                            "sessionId": "session-1",
-                            "timestamp": "2026-01-01T00:01:01Z",
-                            "message": {"content": [{"type": "text", "text": "second answer"}]},
-                        }
-                    ),
-                ]
-            ),
-        )
-
-        original_rebuild = idxmod.rebuild_index_incrementally
-        observed: dict[str, set[str]] = {}
-
-        def spy(index: idxmod.Index, changed_files: set[str], transcripts_dir: Path, codex_dir: Path) -> idxmod.Index:
-            observed["files"] = set(changed_files)
-            return original_rebuild(index, changed_files, transcripts_dir, codex_dir)
-
-        def fail_reindex(self) -> int:
-            raise AssertionError("full reindex should not run when incremental cache path applies")
-
-        monkeypatch.setattr(idxmod, "rebuild_index_incrementally", spy)
-        monkeypatch.setattr(idxmod.TranscriptIndexManager, "reindex", fail_reindex)
-
-        from alzabo.main_cli import _get_manager, build_parser
-
-        parser = build_parser()
-        args = parser.parse_args([
-            "status",
-            "--debounce-seconds", "0",
             "--transcripts-dir", str(transcripts),
             "--codex-dir", str(codex),
         ])
 
+        from alzabo.main_cli import _get_manager
         manager = _get_manager(args)
-        assert str(session_file.resolve()) in observed.get("files", set())
-        assert manager.get_index_status().total_turns == 2
+        # Should load from cache without reindexing
+        assert len(reindex_calls) == 0
+        assert manager.get_index_status().total_turns == 0
 
-    def test_incremental_reuses_cached_vectors(self, monkeypatch):
-        transcripts_dir = Path("/tmp")
-        codex_dir = Path("/tmp")
-
-        stale_base = idxmod.Turn(
-            session_id="s1",
-            turn_number=0,
-            timestamp="2026-01-01T00:00:00Z",
-            project="p",
-            branch="main",
-            slug="s1",
-            source="claude",
-            user_content="question-keep",
-            assistant_content=[],
-            tool_results=[],
-            summary="keep",
-            signals=idxmod.TurnSignals(),
-            records=[],
-            search_text="keep text",
-            source_file="/tmp/stale.jsonl",
-        )
-
-        stale = idxmod.Turn(
-            session_id="s1",
-            turn_number=1,
-            timestamp="2026-01-01T00:01:00Z",
-            project="p",
-            branch="main",
-            slug="s1",
-            source="claude",
-            user_content="question-keep",
-            assistant_content=[],
-            tool_results=[],
-            summary="stale",
-            signals=idxmod.TurnSignals(),
-            records=[],
-            search_text="stale text",
-            source_file="/tmp/stale.jsonl",
-        )
-
-        index = idxmod.Index()
-        convo = idxmod.Conversation(
-            session_id="s1",
-            project="p",
-            branch="main",
-            slug="s1",
-            summary="",
-            first_timestamp="2026-01-01T00:00:00Z",
-            last_timestamp="2026-01-01T00:01:00Z",
-            source="claude",
-        )
-        convo.turns = [stale_base, stale]
-        index.conversations["s1"] = convo
-        index.turns = [stale_base, stale]
-        index.corpus = ["keep text".split(), "stale text".split()]
-        index.embeddings = np.array(
-            [
-                np.array([1.0] * 512, dtype=np.float32),
-                np.array([2.0] * 512, dtype=np.float32),
-            ]
-        )
-
-        reused = idxmod.Turn(
-            session_id="s1",
-            turn_number=0,
-            timestamp="2026-01-01T00:00:00Z",
-            project="p",
-            branch="main",
-            slug="s1",
-            source="claude",
-            user_content="question-keep",
-            assistant_content=[],
-            tool_results=[],
-            summary="keep",
-            signals=idxmod.TurnSignals(),
-            records=[],
-            search_text="keep text",
-            source_file="/tmp/stale.jsonl",
-        )
-
-        refreshed = idxmod.Turn(
-            session_id="s1",
-            turn_number=1,
-            timestamp="2026-01-01T00:01:00Z",
-            project="p",
-            branch="main",
-            slug="s1",
-            source="claude",
-            user_content="question-refresh",
-            assistant_content=[],
-            tool_results=[],
-            summary="refresh",
-            signals=idxmod.TurnSignals(),
-            records=[],
-            search_text="refresh text",
-            source_file="/tmp/stale.jsonl",
-        )
-
-        fake_idx = idxmod.Index()
-        fake_convo = idxmod.Conversation(
-            session_id="s1",
-            project="p",
-            branch="main",
-            slug="s1",
-            summary="refresh",
-            first_timestamp="2026-01-01T00:01:00Z",
-            last_timestamp="2026-01-01T00:01:00Z",
-            source="claude",
-        )
-        fake_convo.turns = [reused, refreshed]
-        fake_idx.turns = [reused, refreshed]
-        fake_idx.corpus = ["keep text".split(), "refresh text".split()]
-        fake_idx.conversations["s1"] = fake_convo
-
-        def fake_build_claude_index_from_files(jsonl_files):
-            return fake_idx, 2
-
-        embed_calls: dict[str, int] = {"count": 0, "shapes": []}
-
-        def fake_embed_texts(texts: list[str]) -> np.ndarray:
-            embed_calls["count"] = len(texts)
-            return np.array([np.array([9.0] * 512, dtype=np.float32) for _ in texts], dtype=np.float32)
-
-        def fake_build_codex_index_from_files(jsonl_files):
-            return idxmod.Index(), 0
-
-        monkeypatch.setattr(idxmod, "build_claude_index_from_files", fake_build_claude_index_from_files)
-        monkeypatch.setattr(idxmod, "build_codex_index_from_files", fake_build_codex_index_from_files)
-        monkeypatch.setattr(idxmod, "embed_texts", fake_embed_texts)
-
-        rebuilt = idxmod.rebuild_index_incrementally(
-            index,
-            changed_files={"/tmp/stale.jsonl"},
-            transcripts_dir=transcripts_dir,
-            codex_dir=codex_dir,
-        )
-
-        assert rebuilt is not None
-        assert embed_calls["count"] == 1
-        assert rebuilt is not None
-        assert len(rebuilt.turns) == 2
-        assert np.allclose(rebuilt.embeddings[0], np.array([1.0] * 512, dtype=np.float32))
-        assert np.allclose(rebuilt.embeddings[1], np.array([9.0] * 512, dtype=np.float32))
 
 def test_extract_subcommand_delegates_to_extract_cli(monkeypatch, tmp_path):
     calls: dict[str, object] = {}
@@ -607,3 +322,28 @@ class TestStatusSubcommand:
         captured = capsys.readouterr()
         d = json.loads(captured.out)
         assert "total_turns" in d
+
+
+class TestReindexSubcommand:
+    def test_reindex_rebuilds_and_saves(self, tmp_path, monkeypatch):
+        transcripts = tmp_path / "claude"
+        codex = tmp_path / "codex"
+        transcripts.mkdir()
+        codex.mkdir()
+
+        monkeypatch.setattr(cache_mod, "CACHE_DIR", tmp_path / "cache")
+        monkeypatch.setattr(idxmod, "embed_texts", lambda texts: np.ones((len(texts), 512), dtype=np.float32))
+
+        parser = build_parser()
+        args = parser.parse_args([
+            "reindex",
+            "--transcripts-dir", str(transcripts),
+            "--codex-dir", str(codex),
+        ])
+
+        from alzabo.main_cli import cmd_reindex
+        cmd_reindex(args)
+
+        # Cache should now exist
+        assert (tmp_path / "cache" / "index.pkl").exists()
+        assert (tmp_path / "cache" / "manifest.json").exists()

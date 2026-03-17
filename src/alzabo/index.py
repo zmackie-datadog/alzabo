@@ -53,6 +53,9 @@ def _dumps(obj: Any) -> str:
 def _get_embed_model():
     global _embed_model
     if _embed_model is None:
+        import os
+        os.environ["HF_HUB_OFFLINE"] = "1"
+
         from model2vec import StaticModel
 
         _log("loading embedding model minishlab/potion-retrieval-32M...")
@@ -940,6 +943,24 @@ def rebuild_index_incrementally(
         vectors_matrix = np.vstack(vectors)
 
     return rebuild_index_from_turns([pair[0] for pair in combined], vectors=vectors_matrix)
+
+
+def load_conversation_content(session_id: str, source_files: set[str]) -> Conversation | None:
+    """Re-parse specific JSONL files to get full conversation content.
+
+    Used by the `read` command when the slim cache has stripped content fields.
+    """
+    is_codex = session_id.startswith("codex:")
+    paths = [Path(f) for f in source_files if Path(f).exists()]
+    if not paths:
+        return None
+
+    if is_codex:
+        idx, _ = build_codex_index_from_files(paths)
+    else:
+        idx, _ = build_claude_index_from_files(paths)
+
+    return idx.conversations.get(session_id)
 
 
 def _path_within_root(path: Path, root: Path) -> bool:
