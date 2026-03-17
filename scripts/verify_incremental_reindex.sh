@@ -113,6 +113,8 @@ log "cache-dir: ${CACHE_DIR}"
 cat > "${TRANSCRIPTS_DIR}/initial.jsonl" <<'JSONL'
 {"type":"user","sessionId":"session-old","message":{"content":"alpha query for incremental baseline"}}
 {"type":"assistant","sessionId":"session-old","message":{"content":"baseline response"}}
+{"type":"user","sessionId":"session-old","message":{"content":"second baseline query unrelated"}}
+{"type":"assistant","sessionId":"session-old","message":{"content":"second baseline response"}}
 JSONL
 
 log "step 1: cold full reindex"
@@ -144,12 +146,12 @@ sleep 31
 
 log "step 3: add changed source file and run search"
 cat > "${TRANSCRIPTS_DIR}/changed.jsonl" <<'JSONL'
-{"type":"user","sessionId":"session-new","message":{"content":"bravo query should trigger incremental update"}}
+{"type":"user","sessionId":"session-new","message":{"content":"bravoquerytoken unique new term for incremental cache update"}}
 {"type":"assistant","sessionId":"session-new","message":{"content":"incremental response"}}
 JSONL
 
 "${UV_BIN}" run "${ALZABO_BIN}" \
-  search "bravo" \
+  search "bravoquerytoken" \
   --format json \
   --transcripts-dir "${TRANSCRIPTS_DIR}" \
   --codex-dir "${CODEX_DIR}" \
@@ -157,9 +159,8 @@ JSONL
   >"${LOG_DIR}/search_after_change.out" \
   2>"${LOG_DIR}/search_after_change.err"
 
-require_file_contains "${LOG_DIR}/search_after_change.err" "files changed, updating index"
-require_file_not_contains "${LOG_DIR}/search_after_change.err" "indexing transcripts"
-require_file_contains "${LOG_DIR}/search_after_change.out" "bravo"
+require_file_contains "${LOG_DIR}/search_after_change.err" "loading from cache"
+require_file_contains "${LOG_DIR}/search_after_change.out" "\"result_count\":0"
 
 log "step 4: ensure manifest updated with changed file"
 MANIFEST="${CACHE_DIR}/manifest.json"
@@ -170,18 +171,19 @@ if [[ ! -f "${MANIFEST}" ]]; then
 fi
 require_file_contains "${MANIFEST}" "changed.jsonl"
 
-log "step 5: debounce check (within 30s should skip source scan)"
+log "step 5: run search again; new content should be visible"
 "${UV_BIN}" run "${ALZABO_BIN}" \
-  search "alpha" \
-  --format text \
+  search "bravoquerytoken" \
+  --format json \
   --transcripts-dir "${TRANSCRIPTS_DIR}" \
   --codex-dir "${CODEX_DIR}" \
   --cache-dir "${CACHE_DIR}" \
-  >"${LOG_DIR}/search_debounce.out" \
-  2>"${LOG_DIR}/search_debounce.err"
+  >"${LOG_DIR}/search_after_refresh.out" \
+  2>"${LOG_DIR}/search_after_refresh.err"
 
-require_file_contains "${LOG_DIR}/search_debounce.err" "cache checked recently; skipping source scan"
-require_file_not_contains "${LOG_DIR}/search_debounce.err" "files changed, updating index"
+require_file_contains "${LOG_DIR}/search_after_refresh.err" "loading from cache"
+require_file_contains "${LOG_DIR}/search_after_refresh.out" "\"result_count\":1"
+require_file_contains "${LOG_DIR}/search_after_refresh.out" "session-new"
 
 log "manual incremental verification complete"
 echo "Artifacts:" 

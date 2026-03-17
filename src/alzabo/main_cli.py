@@ -3,9 +3,22 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import os
 import sys
 from pathlib import Path
+
+
+_PENDING_UPDATE: DeferredUpdate | None = None
+
+
+@dataclass
+class DeferredUpdate:
+    cached_index: "Index"
+    manifest: dict
+    transcripts_dir: Path
+    codex_dir: Path
+    reindex_at: str
 
 
 def _resolve_cache_dir(args: argparse.Namespace) -> Path:
@@ -19,25 +32,22 @@ def _resolve_cache_dir(args: argparse.Namespace) -> Path:
     return cache_mod.get_cache_dir()
 
 
-def _get_manager(args: argparse.Namespace) -> "TranscriptIndexManager":
+def _load_manager(args: argparse.Namespace) -> "TranscriptIndexManager":
     """Build a TranscriptIndexManager, using disk cache when possible.
 
-    Loads from cache first; if cache is stale, tries fast incremental update.
+    Loads from cache first; if cache is stale, defers incremental update until after
+    output is rendered.
     If no cache exists, performs a full reindex (cold start only).
     """
     from .cache import (
-        changed_source_files,
-        collect_source_files,
         is_cache_recently_checked,
         load_cache_bundle,
         save_cache,
-        touch_cache_checked_at,
         set_log_enabled as set_cache_log_enabled,
     )
     from .index import (
         TranscriptIndexManager,
         _log,
-        rebuild_index_incrementally,
         set_log_enabled as set_index_log_enabled,
     )
 
@@ -53,6 +63,8 @@ def _get_manager(args: argparse.Namespace) -> "TranscriptIndexManager":
     manager = TranscriptIndexManager()
     manager.configure(transcripts_dir=transcripts_dir, codex_dir=codex_dir, watch_enabled=False)
 
+    global _PENDING_UPDATE
+    _PENDING_UPDATE = None
     no_cache = getattr(args, "no_cache", False)
 
     if not no_cache:
@@ -72,36 +84,13 @@ def _get_manager(args: argparse.Namespace) -> "TranscriptIndexManager":
                     _log("cache checked recently; skipping source scan")
                     return manager
 
-                current_files = collect_source_files(transcripts_dir, codex_dir)
-                previous_files = manifest.get("source_files", {})
-                if not isinstance(previous_files, dict):
-                    previous_files = {}
-                changed_files = changed_source_files(previous_files, current_files)
-                if not changed_files:
-                    touch_cache_checked_at(transcripts_dir, codex_dir)
-                    return manager
-
-                _log(f"{len(changed_files)} files changed, updating index...")
-                incremental_index = rebuild_index_incrementally(
-                    cached_index,
-                    changed_files,
+                _PENDING_UPDATE = DeferredUpdate(
+                    cached_index=cached_index,
+                    manifest=manifest,
                     transcripts_dir=transcripts_dir,
                     codex_dir=codex_dir,
-                    skip_embeddings=True,
+                    reindex_at=cache_reindex_at,
                 )
-
-                if incremental_index is None:
-                    _log("incremental update unavailable; falling back to full reindex")
-                    manager.reindex()
-                    save_cache(manager._index, transcripts_dir, codex_dir)
-                else:
-                    manager.set_index(incremental_index, reindex_at=cache_reindex_at)
-                    save_cache(
-                        manager._index,
-                        transcripts_dir,
-                        codex_dir,
-                        reindex_at=cache_reindex_at,
-                    )
                 return manager
 
     # Cold start: no usable cache, do a full reindex
@@ -114,10 +103,61 @@ def _get_manager(args: argparse.Namespace) -> "TranscriptIndexManager":
     return manager
 
 
+def _flush_deferred_update() -> None:
+    global _PENDING_UPDATE
+    if _PENDING_UPDATE is None:
+        return
+
+    from .cache import (
+        collect_source_files,
+        changed_source_files,
+        save_cache,
+        touch_cache_checked_at,
+    )
+    from .index import _log, rebuild_index_incrementally
+
+    pending = _PENDING_UPDATE
+    _PENDING_UPDATE = None
+
+    current_files = collect_source_files(pending.transcripts_dir, pending.codex_dir)
+    previous_files = pending.manifest.get("source_files", {})
+    if not isinstance(previous_files, dict):
+        previous_files = {}
+
+    changed_files = changed_source_files(previous_files, current_files)
+    if not changed_files:
+        touch_cache_checked_at(pending.transcripts_dir, pending.codex_dir)
+        return
+
+    _log(f"{len(changed_files)} files changed, updating index...")
+    incremental_index = rebuild_index_incrementally(
+        pending.cached_index,
+        changed_files,
+        transcripts_dir=pending.transcripts_dir,
+        codex_dir=pending.codex_dir,
+        skip_embeddings=True,
+    )
+    if incremental_index is None:
+        touch_cache_checked_at(pending.transcripts_dir, pending.codex_dir)
+        return
+
+    save_cache(
+        incremental_index,
+        pending.transcripts_dir,
+        pending.codex_dir,
+        reindex_at=pending.reindex_at,
+    )
+
+
+def _get_manager(args: argparse.Namespace) -> "TranscriptIndexManager":
+    """Compatibility wrapper retained for older callers."""
+    return _load_manager(args)
+
+
 def cmd_search(args: argparse.Namespace) -> None:
     from .output import format_search_results, format_session_results
 
-    manager = _get_manager(args)
+    manager = _load_manager(args)
     fmt = args.format
 
     if args.sessions:
@@ -148,7 +188,7 @@ def cmd_search(args: argparse.Namespace) -> None:
 def cmd_list(args: argparse.Namespace) -> None:
     from .output import format_conversation_page
 
-    manager = _get_manager(args)
+    manager = _load_manager(args)
     page = manager.list_conversations(
         source=args.source,
         project=args.project,
@@ -164,7 +204,7 @@ def cmd_read(args: argparse.Namespace) -> None:
     from .output import format_conversation, format_turn
     from .index import load_conversation_content
 
-    manager = _get_manager(args)
+    manager = _load_manager(args)
     fmt = args.format
 
     if args.turn is not None:
@@ -218,7 +258,7 @@ def cmd_read(args: argparse.Namespace) -> None:
 def cmd_status(args: argparse.Namespace) -> None:
     from .output import format_index_status
 
-    manager = _get_manager(args)
+    manager = _load_manager(args)
     status = manager.get_index_status()
     print(format_index_status(status, args.format))
 
@@ -370,6 +410,8 @@ def main() -> None:
         sys.exit(1)
 
     args.func(args)
+    sys.stdout.flush()
+    _flush_deferred_update()
 
 
 if __name__ == "__main__":
