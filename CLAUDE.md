@@ -41,7 +41,7 @@ All commands accept `--format text|json|jsonl`. Use `--format json` for structur
 
 - **Cache**: `~/.cache/alzabo/` — pickle index with pre-built BM25 + numpy embeddings
 - **Source data**: `~/.claude/projects/**/*.jsonl` (Claude) + `~/.codex/sessions/**/*.jsonl` (Codex)
-- **Search never reindexes** — it loads the cache as-is. Run `alzabo reindex` explicitly when you want fresh data.
+- **Search auto-updates metadata** by checking source file changes and doing lightweight incremental rebuilds. Run `alzabo reindex` for a full rebuild (or to force complete reindexing).
 - **`read` loads content on demand** — the cache stores only metadata; full turn content is re-parsed from source JSONL files.
 
 ## Development

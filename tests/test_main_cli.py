@@ -206,20 +206,60 @@ class TestCacheBypass:
         _get_manager(args)
         assert embed_calls == []
 
-    def test_stale_cache_still_loads_without_reindex(self, tmp_path, monkeypatch):
-        """With the simplified _get_manager, even stale cache loads without reindexing."""
+    def test_stale_cache_triggers_incremental_update(self, tmp_path, monkeypatch):
+        """With auto-update, stale cache runs incremental rebuild instead of full reindex."""
         transcripts = tmp_path / "claude"
         codex = tmp_path / "codex"
         transcripts.mkdir()
         codex.mkdir()
 
+        old_file = transcripts / "old.jsonl"
+        old_file.write_text('{"type":"user","sessionId":"old-session","message":{"content":"old query"}}\n')
+
         idx = idxmod.Index()
+        convo = idxmod.Conversation(session_id="old-session", project="proj", branch="main", slug="old", source="claude")
+        old_turn = idxmod.Turn(
+            session_id="old-session",
+            turn_number=0,
+            timestamp="2026-01-01T00:00:00Z",
+            project="proj",
+            branch="main",
+            slug="old",
+            source="claude",
+            user_content="old query",
+            assistant_content=[],
+            tool_results=[],
+            summary="old query",
+            signals=idxmod.TurnSignals(),
+            records=[],
+            search_text="old query",
+            source_file=str(old_file),
+        )
+        convo.turns.append(old_turn)
+        idx.turns.append(old_turn)
+        idx.conversations["old-session"] = convo
+        idx.corpus.append(["old", "query"])
         idx.build()
         idx.embeddings = np.empty((0, 512), dtype=np.float32)
         cache_mod.save_cache(idx, transcripts, codex)
+        cache_mod.touch_cache_checked_at(transcripts, codex, checked_at="2026-01-01T00:00:00Z")
 
         # Add a new file to make cache "stale"
-        (transcripts / "new.jsonl").write_text('{"type":"user"}\n')
+        new_file = transcripts / "new.jsonl"
+        new_file.write_text('{"type":"user","sessionId":"new-session","message":{"content":"new query"}}\n')
+
+        rebuild_calls: list[tuple[set[str], bool]] = []
+        original_rebuild = idxmod.rebuild_index_incrementally
+
+        def tracking_rebuild(index, changed_files, transcripts_dir, codex_dir, skip_embeddings=False):
+            rebuild_calls.append((set(changed_files), skip_embeddings))
+            return original_rebuild(
+                index,
+                changed_files,
+                transcripts_dir,
+                codex_dir,
+                skip_embeddings=skip_embeddings,
+            )
 
         reindex_calls = []
         original_reindex = idxmod.TranscriptIndexManager.reindex
@@ -228,6 +268,14 @@ class TestCacheBypass:
             reindex_calls.append(True)
             return original_reindex(self)
 
+        embed_calls: list[int] = []
+
+        def fake_embed_texts(texts: list[str]) -> np.ndarray:
+            embed_calls.append(len(texts))
+            return np.ones((len(texts), 512), dtype=np.float32)
+
+        monkeypatch.setattr(idxmod, "embed_texts", fake_embed_texts)
+        monkeypatch.setattr(idxmod, "rebuild_index_incrementally", tracking_rebuild)
         monkeypatch.setattr(idxmod.TranscriptIndexManager, "reindex", tracking_reindex)
 
         parser = build_parser()
@@ -239,9 +287,111 @@ class TestCacheBypass:
 
         from alzabo.main_cli import _get_manager
         manager = _get_manager(args)
-        # Should load from cache without reindexing
+        assert len(reindex_calls) == 0
+        assert len(rebuild_calls) == 1
+        assert rebuild_calls[0][0] == {str(new_file.resolve())}
+        assert rebuild_calls[0][1] is True
+        assert embed_calls == []
+        status = manager.get_index_status()
+        assert status.total_turns == 2
+        assert status.total_sessions == 2
+
+    def test_stale_cache_no_changes_returns_cached_index(self, tmp_path, monkeypatch):
+        transcripts = tmp_path / "claude"
+        codex = tmp_path / "codex"
+        transcripts.mkdir()
+        codex.mkdir()
+
+        idx = idxmod.Index()
+        idx.build()
+        idx.embeddings = np.empty((0, 512), dtype=np.float32)
+        cache_mod.save_cache(idx, transcripts, codex)
+        cache_mod.touch_cache_checked_at(transcripts, codex, checked_at="2026-01-01T00:00:00Z")
+
+        rebuild_calls: list[bool] = []
+        original_rebuild = idxmod.rebuild_index_incrementally
+
+        def tracking_rebuild(index, changed_files, transcripts_dir, codex_dir, skip_embeddings=False):
+            rebuild_calls.append(True)
+            return original_rebuild(
+                index,
+                changed_files,
+                transcripts_dir,
+                codex_dir,
+                skip_embeddings=skip_embeddings,
+            )
+
+        reindex_calls = []
+        original_reindex = idxmod.TranscriptIndexManager.reindex
+
+        def tracking_reindex(self):
+            reindex_calls.append(True)
+            return original_reindex(self)
+
+        monkeypatch.setattr(idxmod, "rebuild_index_incrementally", tracking_rebuild)
+        monkeypatch.setattr(idxmod.TranscriptIndexManager, "reindex", tracking_reindex)
+
+        parser = build_parser()
+        args = parser.parse_args([
+            "status",
+            "--transcripts-dir", str(transcripts),
+            "--codex-dir", str(codex),
+        ])
+
+        from alzabo.main_cli import _get_manager
+        manager = _get_manager(args)
+        assert len(rebuild_calls) == 0
         assert len(reindex_calls) == 0
         assert manager.get_index_status().total_turns == 0
+
+    def test_cache_debounce_skips_file_scan_within_window(self, tmp_path, monkeypatch):
+        transcripts = tmp_path / "claude"
+        codex = tmp_path / "codex"
+        transcripts.mkdir()
+        codex.mkdir()
+
+        idx = idxmod.Index()
+        idx.build()
+        idx.embeddings = np.empty((0, 512), dtype=np.float32)
+        cache_mod.save_cache(idx, transcripts, codex)
+        cache_mod.touch_cache_checked_at(transcripts, codex)
+
+        (transcripts / "new.jsonl").write_text('{"type":"user","sessionId":"new-session","message":{"content":"new query"}}\n')
+
+        rebuild_calls: list[bool] = []
+        original_rebuild = idxmod.rebuild_index_incrementally
+
+        def tracking_rebuild(index, changed_files, transcripts_dir, codex_dir, skip_embeddings=False):
+            rebuild_calls.append(True)
+            return original_rebuild(
+                index,
+                changed_files,
+                transcripts_dir,
+                codex_dir,
+                skip_embeddings=skip_embeddings,
+            )
+
+        reindex_calls = []
+        original_reindex = idxmod.TranscriptIndexManager.reindex
+
+        def tracking_reindex(self):
+            reindex_calls.append(True)
+            return original_reindex(self)
+
+        monkeypatch.setattr(idxmod, "rebuild_index_incrementally", tracking_rebuild)
+        monkeypatch.setattr(idxmod.TranscriptIndexManager, "reindex", tracking_reindex)
+
+        parser = build_parser()
+        args = parser.parse_args([
+            "status",
+            "--transcripts-dir", str(transcripts),
+            "--codex-dir", str(codex),
+        ])
+
+        from alzabo.main_cli import _get_manager
+        _get_manager(args)
+        assert len(rebuild_calls) == 0
+        assert len(reindex_calls) == 0
 
 
 def test_extract_subcommand_delegates_to_extract_cli(monkeypatch, tmp_path):

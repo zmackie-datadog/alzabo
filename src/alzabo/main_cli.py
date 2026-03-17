@@ -22,17 +22,22 @@ def _resolve_cache_dir(args: argparse.Namespace) -> Path:
 def _get_manager(args: argparse.Namespace) -> "TranscriptIndexManager":
     """Build a TranscriptIndexManager, using disk cache when possible.
 
-    Never blocks on reindex — loads stale cache and returns immediately.
+    Loads from cache first; if cache is stale, tries fast incremental update.
     If no cache exists, performs a full reindex (cold start only).
     """
     from .cache import (
+        changed_source_files,
+        collect_source_files,
+        is_cache_recently_checked,
         load_cache_bundle,
         save_cache,
+        touch_cache_checked_at,
         set_log_enabled as set_cache_log_enabled,
     )
     from .index import (
         TranscriptIndexManager,
         _log,
+        rebuild_index_incrementally,
         set_log_enabled as set_index_log_enabled,
     )
 
@@ -62,6 +67,41 @@ def _get_manager(args: argparse.Namespace) -> "TranscriptIndexManager":
             if same_directories:
                 _log("loading from cache...")
                 manager.set_index(cached_index, reindex_at=cache_reindex_at)
+
+                if is_cache_recently_checked(manifest, 30.0):
+                    _log("cache checked recently; skipping source scan")
+                    return manager
+
+                current_files = collect_source_files(transcripts_dir, codex_dir)
+                previous_files = manifest.get("source_files", {})
+                if not isinstance(previous_files, dict):
+                    previous_files = {}
+                changed_files = changed_source_files(previous_files, current_files)
+                if not changed_files:
+                    touch_cache_checked_at(transcripts_dir, codex_dir)
+                    return manager
+
+                _log(f"{len(changed_files)} files changed, updating index...")
+                incremental_index = rebuild_index_incrementally(
+                    cached_index,
+                    changed_files,
+                    transcripts_dir=transcripts_dir,
+                    codex_dir=codex_dir,
+                    skip_embeddings=True,
+                )
+
+                if incremental_index is None:
+                    _log("incremental update unavailable; falling back to full reindex")
+                    manager.reindex()
+                    save_cache(manager._index, transcripts_dir, codex_dir)
+                else:
+                    manager.set_index(incremental_index, reindex_at=cache_reindex_at)
+                    save_cache(
+                        manager._index,
+                        transcripts_dir,
+                        codex_dir,
+                        reindex_at=cache_reindex_at,
+                    )
                 return manager
 
     # Cold start: no usable cache, do a full reindex

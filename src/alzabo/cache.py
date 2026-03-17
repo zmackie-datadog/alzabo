@@ -19,7 +19,7 @@ from .index import (
     _EMBED_DIM,
 )
 
-CACHE_VERSION = 3
+CACHE_VERSION = 4
 CACHE_DIR = Path.home() / ".cache" / "alzabo"
 _LOG_ENABLED = True
 
@@ -244,7 +244,7 @@ def _slim_turn(turn: Turn) -> Turn:
         summary=turn.summary,
         signals=turn.signals,
         records=[],
-        search_text="",
+        search_text=turn.search_text,
         source_file=turn.source_file,
     )
 

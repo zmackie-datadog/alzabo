@@ -846,6 +846,7 @@ def rebuild_index_incrementally(
     changed_files: set[str],
     transcripts_dir: Path,
     codex_dir: Path,
+    skip_embeddings: bool = False,
 ) -> Index | None:
     if not changed_files:
         return index
@@ -930,11 +931,15 @@ def rebuild_index_incrementally(
 
     missing_vector_indices = [idx for idx, pair in enumerate(combined) if pair[1] is None]
     texts = [combined[idx][0].search_text[:2000] for idx in missing_vector_indices]
-    if texts:
+    if texts and not skip_embeddings:
         _log(f"recomputing {len(texts)} embeddings for incremental rebuild")
         new_vectors = [vec.astype(np.float32) for vec in embed_texts(texts)]
         for target_idx, vec in zip(missing_vector_indices, new_vectors):
             combined[target_idx] = (combined[target_idx][0], vec)
+    else:
+        zero = np.zeros(_EMBED_DIM, dtype=np.float32)
+        for target_idx in missing_vector_indices:
+            combined[target_idx] = (combined[target_idx][0], zero.copy())
 
     vectors = [pair[1] for pair in combined if pair[1] is not None]
     if not vectors:
