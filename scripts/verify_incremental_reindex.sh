@@ -139,6 +139,9 @@ log "step 2: baseline status (cache exists)"
 require_file_contains "${LOG_DIR}/status_before.err" "loading from cache"
 require_file_contains "${LOG_DIR}/status_before.out" "total_turns"
 
+log "step 2.5: wait out debounce window before mutation check"
+sleep 31
+
 log "step 3: add changed source file and run search"
 cat > "${TRANSCRIPTS_DIR}/changed.jsonl" <<'JSONL'
 {"type":"user","sessionId":"session-new","message":{"content":"bravo query should trigger incremental update"}}
