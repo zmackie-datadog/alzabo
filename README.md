@@ -27,7 +27,7 @@ alzabo extract --stats                       # tool call extraction stats
 
 | Subcommand | Description |
 |---|---|
-| `search QUERY` | Search turns. `--sessions` groups by session. `--mode {hybrid,bm25,vector}` (default: bm25), `--context-window N` |
+| `search QUERY` | Search turns. `--sessions` groups by session. `--mode {hybrid,bm25,vector}` (default: bm25), `--context-window N` (default: 0) |
 | `list` | List conversations. `--source`, `--project`, `--start-date`, `--end-date`, `--offset`, `--limit` |
 | `read SESSION_ID` | Read a conversation. `--turn N` for a single turn. `--compact`, `--include-records` |
 | `status` | Show index stats: session counts, turn count, embeddings state, last reindex time |
@@ -36,7 +36,9 @@ alzabo extract --stats                       # tool call extraction stats
 
 ### Global flags
 
+- `--version`: show version and exit
 - `--format {text,json,jsonl}`: output format (default: `text`)
+- `--no-cache`: skip disk cache, force full reindex
 - `--cache-dir`: override cache directory (default: `~/.cache/alzabo`)
 - `--transcripts-dir`: Claude transcript directory (default: `~/.claude/projects`)
 - `--codex-dir`: Codex session directory (default: `~/.codex/sessions`)
@@ -67,13 +69,6 @@ alzabo builds a pickle-based index on first run and saves it to `~/.cache/alzabo
 | Codex | `~/.codex/sessions/**/*.jsonl` | `session_meta`, `event_msg`, `response_item` |
 
 Codex session IDs are prefixed with `codex:` to avoid collisions with Claude session IDs.
-
-## Entry points
-
-| Command | Target | Purpose |
-|---|---|---|
-| `alzabo` | `alzabo.main_cli:main` | Unified CLI with subcommands |
-| `alzabo-extract` | `alzabo.extract_cli:main` | Standalone extraction tool |
 
 ## Development
 
