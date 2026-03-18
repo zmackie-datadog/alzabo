@@ -455,13 +455,14 @@ class TestCacheBypass:
             return original_save_cache(index, transcripts_dir, codex_dir, reindex_at=reindex_at)
 
         monkeypatch.setattr(idxmod, "rebuild_index_incrementally", tracking_rebuild)
+        monkeypatch.setattr(idxmod, "embed_texts", lambda texts: np.ones((len(texts), 512), dtype=np.float32))
         monkeypatch.setattr(cache_mod, "save_cache", tracking_save_cache)
 
         main_cli._flush_deferred_update()
 
         assert len(rebuild_calls) == 1
         assert rebuild_calls[0][0] == {str(new_file.resolve())}
-        assert rebuild_calls[0][1] is True
+        assert rebuild_calls[0][1] is False
         assert len(save_calls) == 1
         assert save_calls[0][0] == 2
         cached_index, _ = cache_mod.load_cache_bundle()

@@ -135,7 +135,6 @@ def _flush_deferred_update() -> None:
         changed_files,
         transcripts_dir=pending.transcripts_dir,
         codex_dir=pending.codex_dir,
-        skip_embeddings=True,
     )
     if incremental_index is None:
         touch_cache_checked_at(pending.transcripts_dir, pending.codex_dir)
