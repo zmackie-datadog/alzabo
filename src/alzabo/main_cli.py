@@ -2,18 +2,21 @@
 
 from __future__ import annotations
 
-import argparse
-from dataclasses import dataclass
 import os
 import sys
+from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 
+import click
 
 _PENDING_UPDATE: DeferredUpdate | None = None
 
 
 @dataclass
 class DeferredUpdate:
+    """A pending incremental index refresh scheduled after command output."""
+
     cached_index: "Index"
     manifest: dict
     transcripts_dir: Path
@@ -21,7 +24,7 @@ class DeferredUpdate:
     reindex_at: str
 
 
-def _resolve_cache_dir(args: argparse.Namespace) -> Path:
+def _resolve_cache_dir(args: SimpleNamespace) -> Path:
     from . import cache as cache_mod
 
     cache_dir = getattr(args, "cache_dir", "")
@@ -32,7 +35,7 @@ def _resolve_cache_dir(args: argparse.Namespace) -> Path:
     return cache_mod.get_cache_dir()
 
 
-def _load_manager(args: argparse.Namespace) -> "TranscriptIndexManager":
+def _load_manager(args: SimpleNamespace) -> "TranscriptIndexManager":
     """Build a TranscriptIndexManager, using disk cache when possible.
 
     Loads from cache first; if cache is stale, defers incremental update until after
@@ -148,12 +151,7 @@ def _flush_deferred_update() -> None:
     )
 
 
-def _get_manager(args: argparse.Namespace) -> "TranscriptIndexManager":
-    """Compatibility wrapper retained for older callers."""
-    return _load_manager(args)
-
-
-def cmd_search(args: argparse.Namespace) -> None:
+def cmd_search(args: SimpleNamespace) -> None:
     from .output import format_search_results, format_session_results
 
     manager = _load_manager(args)
@@ -184,7 +182,7 @@ def cmd_search(args: argparse.Namespace) -> None:
         print(format_search_results(result, fmt))
 
 
-def cmd_list(args: argparse.Namespace) -> None:
+def cmd_list(args: SimpleNamespace) -> None:
     from .output import format_conversation_page
 
     manager = _load_manager(args)
@@ -199,7 +197,7 @@ def cmd_list(args: argparse.Namespace) -> None:
     print(format_conversation_page(page, args.format))
 
 
-def cmd_read(args: argparse.Namespace) -> None:
+def cmd_read(args: SimpleNamespace) -> None:
     from .output import format_conversation, format_turn
     from .index import load_conversation_content
 
@@ -216,7 +214,6 @@ def cmd_read(args: argparse.Namespace) -> None:
             print(f"error: turn out of range: {args.turn}", file=sys.stderr)
             sys.exit(1)
 
-        # If content is stripped (slim cache), reload from source
         if args.include_content and turn.user_content is None and turn.source_file:
             convo = load_conversation_content(turn.session_id, {turn.source_file})
             if convo is not None:
@@ -233,7 +230,6 @@ def cmd_read(args: argparse.Namespace) -> None:
             print(f"error: session not found: {args.session_id}", file=sys.stderr)
             sys.exit(1)
 
-        # If content is stripped (slim cache), reload from source files
         if args.include_content and convo.turns and convo.turns[0].user_content is None:
             source_files = {t.source_file for t in convo.turns if t.source_file}
             if source_files:
@@ -254,7 +250,7 @@ def cmd_read(args: argparse.Namespace) -> None:
         )
 
 
-def cmd_status(args: argparse.Namespace) -> None:
+def cmd_status(args: SimpleNamespace) -> None:
     from .output import format_index_status
 
     manager = _load_manager(args)
@@ -262,23 +258,14 @@ def cmd_status(args: argparse.Namespace) -> None:
     print(format_index_status(status, args.format))
 
 
-def cmd_reindex(args: argparse.Namespace) -> None:
+def cmd_reindex(args: SimpleNamespace) -> None:
     """Explicit reindex: rebuild the cache from source files."""
-    from .cache import (
-        save_cache,
-        set_log_enabled as set_cache_log_enabled,
-    )
-    from .index import (
-        TranscriptIndexManager,
-        _log,
-        set_log_enabled as set_index_log_enabled,
-    )
+    from .cache import save_cache, set_log_enabled as set_cache_log_enabled
+    from .index import TranscriptIndexManager, _log, set_log_enabled as set_index_log_enabled
 
     logging_enabled = not args.quiet
     set_index_log_enabled(logging_enabled)
     set_cache_log_enabled(logging_enabled)
-
-    _resolve_cache_dir(args)
 
     transcripts_dir = Path(args.transcripts_dir).expanduser().resolve()
     codex_dir = Path(args.codex_dir).expanduser().resolve()
@@ -286,13 +273,12 @@ def cmd_reindex(args: argparse.Namespace) -> None:
     manager = TranscriptIndexManager()
     manager.configure(transcripts_dir=transcripts_dir, codex_dir=codex_dir, watch_enabled=False)
 
-    _log("reindexing transcripts...")
     total = manager.reindex()
     save_cache(manager._index, transcripts_dir, codex_dir)
     _log(f"reindex complete: {total} turns cached")
 
 
-def cmd_extract(args: argparse.Namespace) -> None:
+def cmd_extract(args: SimpleNamespace) -> None:
     transcripts_dir = Path(args.transcripts_dir).expanduser().resolve()
     codex_dir = Path(args.codex_dir).expanduser().resolve()
     from .extract_cli import run_extract
@@ -311,7 +297,7 @@ def cmd_extract(args: argparse.Namespace) -> None:
 
 
 def _get_version() -> str:
-    from importlib.metadata import version, PackageNotFoundError
+    from importlib.metadata import PackageNotFoundError, version
 
     try:
         return version("alzabo")
@@ -319,108 +305,470 @@ def _get_version() -> str:
         return "0.0.0-dev"
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="alzabo", description="Search and explore Claude Code and Codex transcripts.")
-    parser.add_argument("--version", action="version", version=f"%(prog)s {_get_version()}")
+def _global_options(func):
+    defaults = {
+        "transcripts_dir": str(Path.home() / ".claude" / "projects"),
+        "codex_dir": str(Path.home() / ".codex" / "sessions"),
+    }
 
-    # Shared parent with global flags — lets them appear before or after subcommand
-    shared = argparse.ArgumentParser(add_help=False)
-    shared.add_argument(
-        "--transcripts-dir",
-        default=str(Path.home() / ".claude" / "projects"),
-        help="Root directory for Claude .jsonl transcripts.",
+    decorators = [
+        click.option(
+            "--transcripts-dir",
+            default=defaults["transcripts_dir"],
+            show_default=True,
+            help=(
+                "Root directory for Claude transcripts. This can be any folder containing "
+                "Claude-style JSONL files; default is ~/.claude/projects."
+            ),
+        ),
+        click.option(
+            "--codex-dir",
+            default=defaults["codex_dir"],
+            show_default=True,
+            help=(
+                "Root directory for Codex session transcripts. This can be any folder "
+                "containing Codex-style JSONL sessions; default is ~/.codex/sessions."
+            ),
+        ),
+        click.option(
+            "--format",
+            "format_",
+            default="text",
+            show_default=True,
+            type=click.Choice(["text", "json", "jsonl"]),
+            help=(
+                "Output format for command payloads. 'text' prints human-readable output, "
+                "'json' prints JSON objects, and 'jsonl' prints newline-delimited JSON lines."
+            ),
+        ),
+        click.option(
+            "--no-cache",
+            is_flag=True,
+            default=False,
+            help=(
+                "Bypass cache loads and writes for this run. Forces a full reindex before "
+                "running the command (except extract/reindex which do not use the cache)."
+            ),
+        ),
+        click.option(
+            "--cache-dir",
+            default="",
+            show_default=True,
+            help=(
+                "Override cache directory path. When empty, ALZABO_CACHE_DIR is consulted "
+                "and then ~/.cache/alzabo is used."
+            ),
+        ),
+        click.option(
+            "--quiet",
+            is_flag=True,
+            default=False,
+            help=(
+                "Silence progress logging and status messages while still printing command output."
+            ),
+        ),
+    ]
+    for decorator in reversed(decorators):
+        func = decorator(func)
+    return func
+
+
+def _namespace_for_command(
+    *,
+    query: str | None = None,
+    **kwargs,
+) -> SimpleNamespace:
+    args = {
+        "quiet": kwargs.pop("quiet"),
+        "cache_dir": kwargs.pop("cache_dir"),
+        "transcripts_dir": kwargs.pop("transcripts_dir"),
+        "codex_dir": kwargs.pop("codex_dir"),
+        "no_cache": kwargs.pop("no_cache"),
+        "format": kwargs.pop("format_"),
+    }
+    args["query"] = query
+    args.update(kwargs)
+    return SimpleNamespace(**args)
+
+
+@click.group(invoke_without_command=True)
+@click.version_option(_get_version(), "--version")
+@click.pass_context
+def cli(ctx: click.Context) -> None:
+    """Search and explore Claude Code and Codex transcripts from the terminal."""
+    if ctx.invoked_subcommand is None:
+        click.echo(ctx.get_help())
+        ctx.exit(1)
+
+
+@cli.command("search", help="Search transcripts.")
+@_global_options
+@click.argument("query", metavar="QUERY")
+@click.option(
+    "--sessions",
+    is_flag=True,
+    help="Group search results by session instead of returning individual turns.",
+)
+@click.option(
+    "--limit",
+    default=10,
+    show_default=True,
+    type=int,
+    help=(
+        "Maximum number of results to return. For session mode this limits sessions; "
+        "for default mode it limits turns."
+    ),
+)
+@click.option(
+    "--source",
+    default="",
+    help="Filter results to one source, e.g. 'claude' or 'codex'. Empty means both.",
+)
+@click.option(
+    "--project",
+    default="",
+    help="Filter results to one project name. Empty means all projects.",
+)
+@click.option(
+    "--start-date",
+    default="",
+    help=(
+        "Filter results to sessions/turns on/after this ISO timestamp. "
+        "Format should be YYYY-MM-DD or full ISO datetime."
+    ),
+)
+@click.option(
+    "--end-date",
+    default="",
+    help=(
+        "Filter results to sessions/turns before this ISO timestamp. "
+        "Format should be YYYY-MM-DD or full ISO datetime."
+    ),
+)
+@click.option(
+    "--mode",
+    default="bm25",
+    show_default=True,
+    type=click.Choice(["bm25", "hybrid", "vector"]),
+    help=(
+        "Search ranking mode. 'bm25' uses keyword matching and is fastest. "
+        "'hybrid' combines BM25 with semantic vector search via reciprocal-rank fusion. "
+        "'vector' uses semantic search only and requires vector model initialization."
+    ),
+)
+@click.option(
+    "--context-window",
+    "context_window",
+    default=0,
+    type=int,
+    help=(
+        "Number of surrounding turns to include as extra context around each matching turn. "
+        "A value of 0 returns exact matches only."
+    ),
+)
+def search(
+    query: str,
+    sessions: bool,
+    limit: int,
+    source: str,
+    project: str,
+    start_date: str,
+    end_date: str,
+    mode: str,
+    context_window: int,
+    transcripts_dir: str,
+    codex_dir: str,
+    format_: str,
+    no_cache: bool,
+    cache_dir: str,
+    quiet: bool,
+) -> None:
+    args = _namespace_for_command(
+        query=query,
+        transcripts_dir=transcripts_dir,
+        codex_dir=codex_dir,
+        format_=format_,
+        no_cache=no_cache,
+        cache_dir=cache_dir,
+        quiet=quiet,
+        sessions=sessions,
+        limit=limit,
+        source=source,
+        project=project,
+        start_date=start_date,
+        end_date=end_date,
+        mode=mode,
+        context_window=context_window,
     )
-    shared.add_argument(
-        "--codex-dir",
-        default=str(Path.home() / ".codex" / "sessions"),
-        help="Root directory for Codex .jsonl sessions.",
+    cmd_search(args)
+
+
+@cli.command("list", help="List conversations.")
+@_global_options
+@click.option(
+    "--limit",
+    default=20,
+    show_default=True,
+    type=int,
+    help="Maximum number of conversations to include per page.",
+)
+@click.option(
+    "--offset",
+    default=0,
+    show_default=True,
+    type=int,
+    help="Number of conversations to skip before the returned page.",
+)
+@click.option(
+    "--source",
+    default="",
+    help="Filter list results to one source, e.g. 'claude' or 'codex'. Empty means both.",
+)
+@click.option(
+    "--project",
+    default="",
+    help="Filter list results to one project name. Empty means all projects.",
+)
+@click.option(
+    "--start-date",
+    default="",
+    help="Include only turns/conversations after this date (ISO format preferred).",
+)
+@click.option(
+    "--end-date",
+    default="",
+    help="Include only turns/conversations before this date (ISO format preferred).",
+)
+def list_convos(
+    limit: int,
+    offset: int,
+    source: str,
+    project: str,
+    start_date: str,
+    end_date: str,
+    transcripts_dir: str,
+    codex_dir: str,
+    format_: str,
+    no_cache: bool,
+    cache_dir: str,
+    quiet: bool,
+) -> None:
+    args = _namespace_for_command(
+        transcripts_dir=transcripts_dir,
+        codex_dir=codex_dir,
+        format_=format_,
+        no_cache=no_cache,
+        cache_dir=cache_dir,
+        quiet=quiet,
+        limit=limit,
+        offset=offset,
+        source=source,
+        project=project,
+        start_date=start_date,
+        end_date=end_date,
     )
-    shared.add_argument("--format", choices=["text", "json", "jsonl"], default="text", help="Output format.")
-    shared.add_argument("--no-cache", action="store_true", help="Skip disk cache, always reindex.")
-    shared.add_argument(
-        "--cache-dir",
-        default="",
-        help="Override cache directory (defaults to ~/.cache/alzabo).",
+    cmd_list(args)
+
+
+@cli.command("read", help="Read a conversation or turn.")
+@_global_options
+@click.argument("session_id", metavar="SESSION_ID")
+@click.option(
+    "--turn",
+    type=int,
+    default=None,
+    help="Return only one turn by numeric index instead of a full conversation.",
+)
+@click.option(
+    "--offset",
+    default=0,
+    show_default=True,
+    type=int,
+    help="Offset within the conversation when printing turns (applies only when --turn is not set).",
+)
+@click.option(
+    "--limit",
+    default=20,
+    show_default=True,
+    type=int,
+    help="Max turns to print when reading a full conversation.",
+)
+@click.option(
+    "--include-records",
+    is_flag=True,
+    help="Include low-level record objects in each turn output.",
+)
+@click.option(
+    "--include-content/--no-include-content",
+    default=True,
+    show_default=True,
+    help=(
+        "Whether to print the message content for each turn. Use --no-include-content "
+        "to suppress long payloads while keeping summary metadata."
+    ),
+)
+@click.option(
+    "--compact",
+    is_flag=True,
+    help="Use compact output for conversation blocks and turns.",
+)
+def read(
+    session_id: str,
+    turn: int | None,
+    offset: int,
+    limit: int,
+    include_records: bool,
+    include_content: bool,
+    compact: bool,
+    transcripts_dir: str,
+    codex_dir: str,
+    format_: str,
+    no_cache: bool,
+    cache_dir: str,
+    quiet: bool,
+) -> None:
+    args = _namespace_for_command(
+        transcripts_dir=transcripts_dir,
+        codex_dir=codex_dir,
+        format_=format_,
+        no_cache=no_cache,
+        cache_dir=cache_dir,
+        quiet=quiet,
+        session_id=session_id,
+        turn=turn,
+        offset=offset,
+        limit=limit,
+        include_records=include_records,
+        include_content=include_content,
+        compact=compact,
     )
-    shared.add_argument(
-        "--quiet",
-        action="store_true",
-        help="Suppress non-essential progress logs.",
+    cmd_read(args)
+
+
+@cli.command("status", help="Show index status.")
+@_global_options
+def status(
+    transcripts_dir: str,
+    codex_dir: str,
+    format_: str,
+    no_cache: bool,
+    cache_dir: str,
+    quiet: bool,
+) -> None:
+    args = _namespace_for_command(
+        transcripts_dir=transcripts_dir,
+        codex_dir=codex_dir,
+        format_=format_,
+        no_cache=no_cache,
+        cache_dir=cache_dir,
+        quiet=quiet,
     )
+    cmd_status(args)
 
-    subparsers = parser.add_subparsers(dest="command")
 
-    # --- search ---
-    p_search = subparsers.add_parser("search", parents=[shared], help="Search transcripts.")
-    p_search.add_argument("query", help="Search query.")
-    p_search.add_argument("--sessions", action="store_true", help="Group results by session.")
-    p_search.add_argument("--limit", type=int, default=10)
-    p_search.add_argument("--source", default="")
-    p_search.add_argument("--project", default="")
-    p_search.add_argument("--start-date", default="")
-    p_search.add_argument("--end-date", default="")
-    p_search.add_argument("--mode", choices=["hybrid", "bm25", "vector"], default="bm25")
-    p_search.add_argument("--context-window", type=int, default=0)
-    p_search.set_defaults(func=cmd_search)
-
-    # --- list ---
-    p_list = subparsers.add_parser("list", parents=[shared], help="List conversations.")
-    p_list.add_argument("--limit", type=int, default=20)
-    p_list.add_argument("--offset", type=int, default=0)
-    p_list.add_argument("--source", default="")
-    p_list.add_argument("--project", default="")
-    p_list.add_argument("--start-date", default="")
-    p_list.add_argument("--end-date", default="")
-    p_list.set_defaults(func=cmd_list)
-
-    # --- read ---
-    p_read = subparsers.add_parser("read", parents=[shared], help="Read a conversation or turn.")
-    p_read.add_argument("session_id", help="Session ID.")
-    p_read.add_argument("--turn", type=int, default=None, help="Specific turn number.")
-    p_read.add_argument("--offset", type=int, default=0)
-    p_read.add_argument("--limit", type=int, default=20)
-    p_read.add_argument("--include-records", action="store_true")
-    p_read.add_argument("--include-content", action=argparse.BooleanOptionalAction, default=True)
-    p_read.add_argument("--compact", action="store_true")
-    p_read.set_defaults(func=cmd_read)
-
-    # --- status ---
-    p_status = subparsers.add_parser("status", parents=[shared], help="Show index status.")
-    p_status.set_defaults(func=cmd_status)
-
-    # --- reindex ---
-    p_reindex = subparsers.add_parser("reindex", parents=[shared], help="Rebuild the index from source files.")
-    p_reindex.set_defaults(func=cmd_reindex)
-
-    # --- extract ---
-    p_extract = subparsers.add_parser("extract", parents=[shared], help="Extract structured tool call records.")
-    p_extract.add_argument("--tool", default="", help="Filter by tool name substring.")
-    p_extract.add_argument(
-        "--category", default="", choices=["builtin", "mcp", "bash", "agent", ""],
-        help="Filter by tool category.",
+@cli.command("reindex", help="Rebuild the index from source files.")
+@_global_options
+def reindex(
+    transcripts_dir: str,
+    codex_dir: str,
+    format_: str,
+    no_cache: bool,
+    cache_dir: str,
+    quiet: bool,
+) -> None:
+    args = _namespace_for_command(
+        transcripts_dir=transcripts_dir,
+        codex_dir=codex_dir,
+        format_=format_,
+        no_cache=no_cache,
+        cache_dir=cache_dir,
+        quiet=quiet,
     )
-    p_extract.add_argument("--project", default="", help="Filter by project name.")
-    p_extract.add_argument("--session", default="", help="Filter by session ID.")
-    p_extract.add_argument("--errors-only", action="store_true")
-    p_extract.add_argument("--stats", action="store_true", help="Print summary stats instead of JSONL.")
-    p_extract.add_argument("--extract-limit", type=int, default=0, help="Max records (0 = unlimited).")
-    p_extract.set_defaults(func=cmd_extract)
+    cmd_reindex(args)
 
-    return parser
+
+@cli.command("extract", help="Extract structured tool call records.")
+@_global_options
+@click.option(
+    "--tool",
+    default="",
+    help="Filter by tool name substring; empty means all tools.",
+)
+@click.option(
+    "--category",
+    default="",
+    type=click.Choice(["", "builtin", "mcp", "bash", "agent"]),
+    show_default=False,
+    help=(
+        "Filter by tool category. Options are builtin, mcp, bash, agent, or empty for all."
+    ),
+)
+@click.option(
+    "--project",
+    default="",
+    help="Filter by project name substring.",
+)
+@click.option(
+    "--session",
+    default="",
+    help="Filter by exact session ID.",
+)
+@click.option(
+    "--errors-only",
+    is_flag=True,
+    help="Only include tool call records where execution failed.",
+)
+@click.option(
+    "--stats",
+    is_flag=True,
+    help="Instead of JSONL output, print summary statistics.",
+)
+@click.option(
+    "--extract-limit",
+    default=0,
+    show_default=True,
+    type=int,
+    help="Maximum number of records to emit. Zero means unlimited.",
+)
+def extract(
+    tool: str,
+    category: str,
+    project: str,
+    session: str,
+    errors_only: bool,
+    stats: bool,
+    extract_limit: int,
+    transcripts_dir: str,
+    codex_dir: str,
+    format_: str,
+    no_cache: bool,
+    cache_dir: str,
+    quiet: bool,
+) -> None:
+    args = _namespace_for_command(
+        transcripts_dir=transcripts_dir,
+        codex_dir=codex_dir,
+        format_=format_,
+        no_cache=no_cache,
+        cache_dir=cache_dir,
+        quiet=quiet,
+        tool=tool,
+        category=category,
+        project=project,
+        session=session,
+        errors_only=errors_only,
+        stats=stats,
+        extract_limit=extract_limit,
+    )
+    cmd_extract(args)
 
 
 def main() -> None:
-    parser = build_parser()
-    argv = sys.argv[1:]
-
-    args = parser.parse_args(argv)
-    if not args.command:
-        parser.print_help()
-        sys.exit(1)
-
-    args.func(args)
-    sys.stdout.flush()
-    _flush_deferred_update()
+    try:
+        cli()
+    finally:
+        sys.stdout.flush()
+        _flush_deferred_update()
 
 
 if __name__ == "__main__":
