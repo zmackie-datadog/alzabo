@@ -21,6 +21,7 @@ classifiers = [
     "Topic :: Software Development :: Libraries",
 ]
 dependencies = [
+  "click",
   "model2vec",
   "numpy",
   "rank-bm25",

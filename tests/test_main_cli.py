@@ -1,96 +1,86 @@
 from __future__ import annotations
+
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from click.testing import CliRunner
 
 import alzabo.cache as cache_mod
 import alzabo.index as idxmod
-from alzabo.main_cli import build_parser
+from alzabo.main_cli import _flush_deferred_update, _load_manager, cli
 
 
-class TestParser:
-    def test_search_parses(self):
-        parser = build_parser()
-        args = parser.parse_args(["search", "oauth", "--mode", "bm25", "--limit", "5"])
-        assert args.command == "search"
-        assert args.query == "oauth"
-        assert args.mode == "bm25"
-        assert args.limit == 5
-        assert args.sessions is False
+def _build_args(**kwargs):
+    defaults = {
+        "quiet": False,
+        "cache_dir": "",
+        "transcripts_dir": str(Path.home() / ".claude" / "projects"),
+        "codex_dir": str(Path.home() / ".codex" / "sessions"),
+        "no_cache": False,
+        "format": "text",
+    }
+    defaults.update(kwargs)
+    return SimpleNamespace(**defaults)
 
-    def test_search_sessions_flag(self):
-        parser = build_parser()
-        args = parser.parse_args(["search", "test", "--sessions"])
-        assert args.sessions is True
 
-    def test_search_default_mode_is_bm25(self):
-        parser = build_parser()
-        args = parser.parse_args(["search", "test"])
-        assert args.mode == "bm25"
+def test_search_help(runner):
+    result = runner.invoke(cli, ["search", "--help"])
 
-    def test_list_parses(self):
-        parser = build_parser()
-        args = parser.parse_args(["list", "--format", "json", "--offset", "10"])
-        assert args.command == "list"
-        assert args.offset == 10
-        assert args.format == "json"
+    assert result.exit_code == 0
+    assert "Search transcripts." in result.output
+    assert "Usage: cli search [OPTIONS] QUERY" in result.output
+    assert "bm25" in result.output
 
-    def test_read_parses(self):
-        parser = build_parser()
-        args = parser.parse_args(["read", "abc-123", "--turn", "2"])
-        assert args.command == "read"
-        assert args.session_id == "abc-123"
-        assert args.turn == 2
 
-    def test_read_no_turn(self):
-        parser = build_parser()
-        args = parser.parse_args(["read", "abc-123"])
-        assert args.turn is None
+def test_list_help(runner):
+    result = runner.invoke(cli, ["list", "--help"])
 
-    def test_status_parses(self):
-        parser = build_parser()
-        args = parser.parse_args(["status", "--no-cache"])
-        assert args.command == "status"
-        assert args.no_cache is True
+    assert result.exit_code == 0
+    assert "List conversations." in result.output
 
-    def test_reindex_parses(self):
-        parser = build_parser()
-        args = parser.parse_args(["reindex"])
-        assert args.command == "reindex"
 
-    def test_extract_parses(self):
-        parser = build_parser()
-        args = parser.parse_args(["extract", "--stats", "--tool", "Bash"])
-        assert args.command == "extract"
-        assert args.stats is True
-        assert args.tool == "Bash"
+def test_read_help(runner):
+    result = runner.invoke(cli, ["read", "--help"])
 
-    def test_global_format_default(self):
-        parser = build_parser()
-        args = parser.parse_args(["status"])
-        assert args.format == "text"
+    assert result.exit_code == 0
+    assert "Read a conversation or turn." in result.output
+    assert "SESSION_ID" in result.output
 
-    def test_global_format_jsonl(self):
-        parser = build_parser()
-        args = parser.parse_args(["list", "--format", "jsonl"])
-        assert args.format == "jsonl"
 
-    def test_global_quiet(self):
-        parser = build_parser()
-        args = parser.parse_args(["status", "--quiet"])
-        assert args.quiet is True
+def test_status_default_format(runner):
+    result = runner.invoke(cli, ["status", "--help"])
 
-    def test_global_cache_dir(self):
-        parser = build_parser()
-        args = parser.parse_args(["status", "--cache-dir", "/tmp/alzabo-cache-test"])
-        assert args.cache_dir == "/tmp/alzabo-cache-test"
+    assert result.exit_code == 0
+    assert "Show index status." in result.output
+    assert "default: text" in result.output
+
+
+def test_global_format_jsonl(runner):
+    result = runner.invoke(cli, ["list", "--help"])
+
+    assert result.exit_code == 0
+    assert "jsonl" in result.output
+
+
+def test_global_quiet_option(runner):
+    result = runner.invoke(cli, ["status", "--help"])
+
+    assert result.exit_code == 0
+    assert "--quiet" in result.output
+
+
+def test_global_cache_dir_option(runner):
+    result = runner.invoke(cli, ["status", "--help"])
+
+    assert result.exit_code == 0
+    assert "--cache-dir" in result.output
 
 
 class TestCacheConfig:
-    def test_cache_dir_env(self, tmp_path, monkeypatch):
-        parser = build_parser()
+    def test_cache_dir_env(self, tmp_path, monkeypatch, runner):
         transcripts = tmp_path / "claude"
         codex = tmp_path / "codex"
         transcripts.mkdir()
@@ -98,15 +88,13 @@ class TestCacheConfig:
         monkeypatch.setattr(idxmod, "embed_texts", lambda texts: np.ones((len(texts), 3), dtype=np.float32))
 
         monkeypatch.setenv("ALZABO_CACHE_DIR", str(tmp_path / "from-env"))
-        args = parser.parse_args([
-            "status",
-            "--no-cache",
-            "--transcripts-dir", str(transcripts),
-            "--codex-dir", str(codex),
-        ])
-        from alzabo.main_cli import _load_manager
-
-        _load_manager(args)
+        _load_manager(
+            _build_args(
+                no_cache=True,
+                transcripts_dir=str(transcripts),
+                codex_dir=str(codex),
+            )
+        )
         assert cache_mod.get_cache_dir() == (tmp_path / "from-env").resolve()
 
 
@@ -135,15 +123,13 @@ class TestCacheBypass:
 
         monkeypatch.setattr(idxmod.TranscriptIndexManager, "reindex", tracking_reindex)
 
-        parser = build_parser()
-        args = parser.parse_args([
-            "status", "--no-cache",
-            "--transcripts-dir", str(transcripts),
-            "--codex-dir", str(codex),
-        ])
-
-        from alzabo.main_cli import _load_manager
-        _load_manager(args)
+        _load_manager(
+            _build_args(
+                no_cache=True,
+                transcripts_dir=str(transcripts),
+                codex_dir=str(codex),
+            )
+        )
         assert len(reindex_calls) == 1
 
     def test_fresh_cache_skips_reindex(self, tmp_path, monkeypatch):
@@ -154,7 +140,6 @@ class TestCacheBypass:
 
         monkeypatch.setattr(idxmod, "embed_texts", lambda texts: np.ones((len(texts), 3), dtype=np.float32))
 
-        # Pre-populate cache
         idx = idxmod.Index()
         idx.build()
         idx.embeddings = np.empty((0, 512), dtype=np.float32)
@@ -169,15 +154,12 @@ class TestCacheBypass:
 
         monkeypatch.setattr(idxmod.TranscriptIndexManager, "reindex", tracking_reindex)
 
-        parser = build_parser()
-        args = parser.parse_args([
-            "status",
-            "--transcripts-dir", str(transcripts),
-            "--codex-dir", str(codex),
-        ])
-
-        from alzabo.main_cli import _load_manager
-        _load_manager(args)
+        _load_manager(
+            _build_args(
+                transcripts_dir=str(transcripts),
+                codex_dir=str(codex),
+            )
+        )
         assert len(reindex_calls) == 0
 
     def test_fresh_cache_skips_embedding(self, tmp_path, monkeypatch):
@@ -197,16 +179,13 @@ class TestCacheBypass:
         idx.embeddings = np.empty((0, 512), dtype=np.float32)
         cache_mod.save_cache(idx, transcripts, codex)
 
-        parser = build_parser()
-        args = parser.parse_args([
-            "status",
-            "--transcripts-dir", str(transcripts),
-            "--codex-dir", str(codex),
-        ])
-
-        from alzabo.main_cli import _load_manager
         monkeypatch.setattr(idxmod, "embed_texts", fake_embed_texts)
-        _load_manager(args)
+        _load_manager(
+            _build_args(
+                transcripts_dir=str(transcripts),
+                codex_dir=str(codex),
+            )
+        )
         assert embed_calls == []
 
     def test_stale_cache_sets_deferred_update(self, tmp_path, monkeypatch):
@@ -246,16 +225,8 @@ class TestCacheBypass:
         cache_mod.save_cache(idx, transcripts, codex)
         cache_mod.touch_cache_checked_at(transcripts, codex, checked_at="2026-01-01T00:00:00Z")
 
-        # Add a new file to make cache "stale"
         new_file = transcripts / "new.jsonl"
         new_file.write_text('{"type":"user","sessionId":"new-session","message":{"content":"new query"}}\n')
-
-        parser = build_parser()
-        args = parser.parse_args([
-            "status",
-            "--transcripts-dir", str(transcripts),
-            "--codex-dir", str(codex),
-        ])
 
         import alzabo.main_cli as main_cli
 
@@ -273,7 +244,12 @@ class TestCacheBypass:
             )
 
         monkeypatch.setattr(idxmod, "rebuild_index_incrementally", tracking_rebuild)
-        manager = main_cli._load_manager(args)
+        manager = main_cli._load_manager(
+            _build_args(
+                transcripts_dir=str(transcripts),
+                codex_dir=str(codex),
+            )
+        )
         assert manager.get_index_status().total_turns == 1
         assert len(rebuild_calls) == 0
         assert main_cli._PENDING_UPDATE is not None
@@ -314,17 +290,14 @@ class TestCacheBypass:
         monkeypatch.setattr(idxmod, "rebuild_index_incrementally", tracking_rebuild)
         monkeypatch.setattr(idxmod.TranscriptIndexManager, "reindex", tracking_reindex)
 
-        parser = build_parser()
-        args = parser.parse_args([
-            "status",
-            "--transcripts-dir", str(transcripts),
-            "--codex-dir", str(codex),
-        ])
-
-        from alzabo.main_cli import _load_manager
         import alzabo.main_cli as main_cli
 
-        manager = _load_manager(args)
+        manager = _load_manager(
+            _build_args(
+                transcripts_dir=str(transcripts),
+                codex_dir=str(codex),
+            )
+        )
         assert len(rebuild_calls) == 0
         assert len(reindex_calls) == 0
         assert main_cli._PENDING_UPDATE is not None
@@ -364,20 +337,17 @@ class TestCacheBypass:
             reindex_calls.append(True)
             return original_reindex(self)
 
+        import alzabo.main_cli as main_cli
+
         monkeypatch.setattr(idxmod, "rebuild_index_incrementally", tracking_rebuild)
         monkeypatch.setattr(idxmod.TranscriptIndexManager, "reindex", tracking_reindex)
 
-        parser = build_parser()
-        args = parser.parse_args([
-            "status",
-            "--transcripts-dir", str(transcripts),
-            "--codex-dir", str(codex),
-        ])
-
-        from alzabo.main_cli import _load_manager
-        import alzabo.main_cli as main_cli
-
-        _load_manager(args)
+        _load_manager(
+            _build_args(
+                transcripts_dir=str(transcripts),
+                codex_dir=str(codex),
+            )
+        )
         assert main_cli._PENDING_UPDATE is None
         assert len(rebuild_calls) == 0
         assert len(reindex_calls) == 0
@@ -422,16 +392,14 @@ class TestCacheBypass:
         new_file = transcripts / "new.jsonl"
         new_file.write_text('{"type":"user","sessionId":"new-session","message":{"content":"new query"}}\n')
 
-        parser = build_parser()
-        args = parser.parse_args([
-            "status",
-            "--transcripts-dir", str(transcripts),
-            "--codex-dir", str(codex),
-        ])
-
         import alzabo.main_cli as main_cli
 
-        main_cli._load_manager(args)
+        _load_manager(
+            _build_args(
+                transcripts_dir=str(transcripts),
+                codex_dir=str(codex),
+            )
+        )
         assert main_cli._PENDING_UPDATE is not None
 
         rebuild_calls: list[tuple[set[str], bool]] = []
@@ -458,7 +426,7 @@ class TestCacheBypass:
         monkeypatch.setattr(idxmod, "embed_texts", lambda texts: np.ones((len(texts), 512), dtype=np.float32))
         monkeypatch.setattr(cache_mod, "save_cache", tracking_save_cache)
 
-        main_cli._flush_deferred_update()
+        _flush_deferred_update()
 
         assert len(rebuild_calls) == 1
         assert rebuild_calls[0][0] == {str(new_file.resolve())}
@@ -481,17 +449,13 @@ class TestCacheBypass:
         cache_mod.save_cache(idx, transcripts, codex)
         cache_mod.touch_cache_checked_at(transcripts, codex, checked_at="2026-01-01T00:00:00Z")
 
-        parser = build_parser()
-        args = parser.parse_args([
-            "status",
-            "--transcripts-dir", str(transcripts),
-            "--codex-dir", str(codex),
-        ])
-
+        _load_manager(
+            _build_args(
+                transcripts_dir=str(transcripts),
+                codex_dir=str(codex),
+            )
+        )
         import alzabo.main_cli as main_cli
-
-        main_cli._load_manager(args)
-        assert main_cli._PENDING_UPDATE is not None
 
         rebuild_calls: list[tuple[set[str], bool]] = []
         touch_calls: list[tuple[str, str]] = []
@@ -515,7 +479,8 @@ class TestCacheBypass:
         monkeypatch.setattr(idxmod, "rebuild_index_incrementally", tracking_rebuild)
         monkeypatch.setattr(cache_mod, "touch_cache_checked_at", tracking_touch_cache_checked_at)
 
-        main_cli._flush_deferred_update()
+        assert main_cli._PENDING_UPDATE is not None
+        _flush_deferred_update()
 
         assert len(rebuild_calls) == 0
         assert len(touch_calls) == 1
@@ -530,17 +495,14 @@ class TestCacheBypass:
         idx.build()
         cache_mod.save_cache(idx, transcripts, codex)
 
-        parser = build_parser()
-        args = parser.parse_args([
-            "status",
-            "--transcripts-dir", str(transcripts),
-            "--codex-dir", str(codex),
-        ])
-
         import alzabo.main_cli as main_cli
 
-        from alzabo.main_cli import _load_manager
-        _load_manager(args)
+        _load_manager(
+            _build_args(
+                transcripts_dir=str(transcripts),
+                codex_dir=str(codex),
+            )
+        )
         assert main_cli._PENDING_UPDATE is None
 
     def test_cold_start_reindexes_synchronously(self, tmp_path, monkeypatch):
@@ -558,22 +520,18 @@ class TestCacheBypass:
 
         monkeypatch.setattr(idxmod.TranscriptIndexManager, "reindex", tracking_reindex)
 
-        parser = build_parser()
-        args = parser.parse_args([
-            "status",
-            "--transcripts-dir", str(transcripts),
-            "--codex-dir", str(codex),
-        ])
-
-        import alzabo.main_cli as main_cli
-
-        from alzabo.main_cli import _load_manager
-        _load_manager(args)
+        _load_manager(
+            _build_args(
+                transcripts_dir=str(transcripts),
+                codex_dir=str(codex),
+            )
+        )
         assert len(reindex_calls) == 1
+        import alzabo.main_cli as main_cli
         assert main_cli._PENDING_UPDATE is None
 
 
-def test_extract_subcommand_delegates_to_extract_cli(monkeypatch, tmp_path):
+def test_extract_subcommand_delegates_to_extract_cli(monkeypatch, tmp_path, runner):
     calls: dict[str, object] = {}
 
     def fake_run_extract(
@@ -595,19 +553,32 @@ def test_extract_subcommand_delegates_to_extract_cli(monkeypatch, tmp_path):
         calls["limit"] = limit
 
     monkeypatch.setattr("alzabo.extract_cli.run_extract", fake_run_extract)
-    parser = build_parser()
-    args = parser.parse_args(["extract", "--tool", "Bash", "--extract-limit", "5"])
+    transcripts = tmp_path / "claude"
+    codex = tmp_path / "codex"
+    transcripts.mkdir()
+    codex.mkdir()
+    result = runner.invoke(
+        cli,
+        [
+            "extract",
+            "--tool",
+            "Bash",
+            "--extract-limit",
+            "5",
+            "--transcripts-dir",
+            str(transcripts),
+            "--codex-dir",
+            str(codex),
+        ],
+    )
 
-    import alzabo.main_cli as main_cli
-
-    main_cli.cmd_extract(args)
-
+    assert result.exit_code == 0
     assert calls["tool_filter"] == "Bash"
     assert calls["limit"] == 5
 
 
 class TestStatusSubcommand:
-    def test_status_text_output(self, tmp_path, monkeypatch, capsys):
+    def test_status_text_output(self, tmp_path, monkeypatch, runner):
         transcripts = tmp_path / "claude"
         codex = tmp_path / "codex"
         transcripts.mkdir()
@@ -616,20 +587,22 @@ class TestStatusSubcommand:
         monkeypatch.setattr(cache_mod, "CACHE_DIR", tmp_path / "cache")
         monkeypatch.setattr(idxmod, "embed_texts", lambda texts: np.ones((len(texts), 3), dtype=np.float32))
 
-        parser = build_parser()
-        args = parser.parse_args([
-            "status", "--no-cache",
-            "--transcripts-dir", str(transcripts),
-            "--codex-dir", str(codex),
-        ])
+        result = runner.invoke(
+            cli,
+            [
+                "status",
+                "--no-cache",
+                "--transcripts-dir",
+                str(transcripts),
+                "--codex-dir",
+                str(codex),
+            ],
+        )
 
-        from alzabo.main_cli import cmd_status
-        cmd_status(args)
+        assert result.exit_code == 0
+        assert "alzabo status" in result.output
 
-        captured = capsys.readouterr()
-        assert "alzabo status" in captured.out
-
-    def test_status_json_output(self, tmp_path, monkeypatch, capsys):
+    def test_status_json_output(self, tmp_path, monkeypatch, runner):
         transcripts = tmp_path / "claude"
         codex = tmp_path / "codex"
         transcripts.mkdir()
@@ -638,23 +611,28 @@ class TestStatusSubcommand:
         monkeypatch.setattr(cache_mod, "CACHE_DIR", tmp_path / "cache")
         monkeypatch.setattr(idxmod, "embed_texts", lambda texts: np.ones((len(texts), 3), dtype=np.float32))
 
-        parser = build_parser()
-        args = parser.parse_args([
-            "status", "--no-cache", "--format", "json",
-            "--transcripts-dir", str(transcripts),
-            "--codex-dir", str(codex),
-        ])
+        result = runner.invoke(
+            cli,
+            [
+                "status",
+                "--no-cache",
+                "--quiet",
+                "--format",
+                "json",
+                "--transcripts-dir",
+                str(transcripts),
+                "--codex-dir",
+                str(codex),
+            ],
+        )
 
-        from alzabo.main_cli import cmd_status
-        cmd_status(args)
-
-        captured = capsys.readouterr()
-        d = json.loads(captured.out)
+        assert result.exit_code == 0
+        d = json.loads(result.output)
         assert "total_turns" in d
 
 
 class TestReindexSubcommand:
-    def test_reindex_rebuilds_and_saves(self, tmp_path, monkeypatch):
+    def test_reindex_rebuilds_and_saves(self, tmp_path, monkeypatch, runner):
         transcripts = tmp_path / "claude"
         codex = tmp_path / "codex"
         transcripts.mkdir()
@@ -663,16 +641,23 @@ class TestReindexSubcommand:
         monkeypatch.setattr(cache_mod, "CACHE_DIR", tmp_path / "cache")
         monkeypatch.setattr(idxmod, "embed_texts", lambda texts: np.ones((len(texts), 512), dtype=np.float32))
 
-        parser = build_parser()
-        args = parser.parse_args([
-            "reindex",
-            "--transcripts-dir", str(transcripts),
-            "--codex-dir", str(codex),
-        ])
-
-        from alzabo.main_cli import cmd_reindex
-        cmd_reindex(args)
+        result = runner.invoke(
+            cli,
+            [
+                "reindex",
+                "--transcripts-dir",
+                str(transcripts),
+                "--codex-dir",
+                str(codex),
+            ],
+        )
+        assert result.exit_code == 0
 
         # Cache should now exist
         assert (tmp_path / "cache" / "index.pkl").exists()
         assert (tmp_path / "cache" / "manifest.json").exists()
+
+
+@pytest.fixture
+def runner():
+    return CliRunner()
