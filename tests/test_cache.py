@@ -68,7 +68,7 @@ class TestCacheRoundtrip:
             # Content is stripped in slim cache
             assert load_t.user_content is None
             assert load_t.assistant_content == []
-            assert load_t.search_text == ""
+            assert load_t.search_text == orig_t.search_text
 
     def test_load_cache_bundle(self, tmp_path):
         transcripts = tmp_path / "claude"
@@ -372,7 +372,7 @@ class TestSlimIndex:
         assert slim.assistant_content == []
         assert slim.tool_results == []
         assert slim.records == []
-        assert slim.search_text == ""
+        assert slim.search_text == "big question big answer"
         assert slim.summary == "short summary"
         assert slim.signals.tools == ["Read"]
         assert slim.source_file == "/tmp/test.jsonl"

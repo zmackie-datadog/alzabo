@@ -846,6 +846,7 @@ def rebuild_index_incrementally(
     changed_files: set[str],
     transcripts_dir: Path,
     codex_dir: Path,
+    skip_embeddings: bool = False,
 ) -> Index | None:
     if not changed_files:
         return index
