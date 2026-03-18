@@ -19,7 +19,7 @@ Core hypothesis:
 - collect real queries agents made to alzabo (via `alzabo-extract` filtering for `mcp__alzabo__*` tool calls)
 - manually review ~50-100 query-result pairs, categorize failure modes
 - build a labeled query set (~100 entries) stored as JSON in-repo
-- see EVAL_AUDIT.md for detailed findings and sampling strategies
+- see git history for prior eval audit findings and sampling strategies
 
 ### Phase 2 — Evaluators & regression gate
 
@@ -38,4 +38,4 @@ Core hypothesis:
 Current status:
 
 - extraction module implemented (Phase 0)
-- no validation work implemented yet (see EVAL_AUDIT.md for prioritized gaps)
+- no validation work implemented yet

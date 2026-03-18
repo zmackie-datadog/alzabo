@@ -44,7 +44,7 @@ alzabo extract --stats                       # tool call extraction stats
 
 ### Disk cache
 
-alzabo builds a pickle-based index on first `reindex` and saves it to `~/.cache/alzabo/`. Search loads the cache as-is and never reindexes automatically -- run `alzabo reindex` explicitly when you want fresh data.
+alzabo builds a pickle-based index on first run and saves it to `~/.cache/alzabo/`. Commands load the cache immediately and defer incremental updates until after output prints (stale-while-revalidate). Run `alzabo reindex` for a forced full rebuild.
 
 ## Search modes
 
